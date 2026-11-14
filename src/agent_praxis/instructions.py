@@ -1,0 +1,71 @@
+"""The rules every agent reads, kept in a marked section of AGENTS.md and CLAUDE.md.
+
+Praxis only ever changes the text between its own two marker lines. Everything else in those files is left
+exactly as it was. Running `praxis init` again refreshes the section instead of adding a second copy.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+START = "<!-- praxis:start -->"
+END = "<!-- praxis:end -->"
+FILES = ("AGENTS.md", "CLAUDE.md")
+
+BODY = """## Working alongside other AI agents: use Praxis
+
+Several AI agents work on this project at the same time. Praxis stops them from breaking each
+other's work. Follow these rules exactly. (This section was written by `praxis init`; Praxis
+only changes the text between the two praxis marker lines.)
+
+1. Use one short name for yourself every time, for example `claude-1` or `codex-2`.
+2. Before you change anything, start from the main project folder:
+   `praxis start <your-name> "<what you are doing>" <files or folders you will change>`
+   Praxis makes your own folder (a git worktree) and prints where it is.
+   Work ONLY inside that folder. Never edit files in the main project folder.
+3. To change more files later, claim them first:
+   `praxis claim <your-name> <file or folder> ...`
+   If Praxis says another agent holds a file, do not edit it. Pick other work, or wait.
+4. Asset files (scenes, levels, prefabs, models, textures, sounds) cannot be merged.
+   Never edit one you have not claimed. Claim it before you touch it.
+5. When your change is finished, run `praxis land <your-name>`.
+   Praxis saves (commits) your work, puts it on top of the newest version, runs the
+   project check and lands it only if the check passes. If it says you are waiting in
+   line, let it wait: waiting is normal and never fails.
+6. If landing fails, read the failure text Praxis prints, fix the problem in your folder,
+   and run `praxis land <your-name>` again. Your work is always kept.
+7. When your task is finished and landed, run `praxis done <your-name>`.
+8. If you are stuck (the same failure keeps coming back, or you need a decision from
+   the human), STOP. Run `praxis blocked <your-name> "<what you need>"` and tell the human.
+   Do not keep retrying the same thing.
+9. Never run `git push`, `git reset --hard`, `git clean`, or delete branches or folders
+   Praxis made. Praxis handles all of that.
+
+Run `praxis status` at any time to see who is working on what."""
+
+
+def block() -> str:
+    return f"{START}\n{BODY}\n{END}\n"
+
+
+def write_into(path: Path) -> str:
+    """Add or refresh the Praxis section in *path*. Returns 'created', 'added' or 'updated'."""
+    if not path.exists():
+        path.write_text(block(), encoding="utf-8", newline="\n")
+        return "created"
+    text = path.read_text(encoding="utf-8")
+    begin, end = text.find(START), text.find(END)
+    if begin != -1 and end > begin:
+        tail = text[end + len(END):]
+        if tail.startswith("\r\n"):
+            tail = tail[2:]
+        elif tail.startswith("\n"):
+            tail = tail[1:]
+        new = text[:begin] + block() + tail
+        if new == text:
+            return "unchanged"
+        path.write_text(new, encoding="utf-8", newline="")
+        return "updated"
+    sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+    path.write_text(text + sep + block(), encoding="utf-8", newline="")
+    return "added"
