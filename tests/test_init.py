@@ -23,8 +23,9 @@ def test_init_detects_godot_writes_rules_and_commits(project):
 def test_init_keeps_existing_text_and_never_duplicates(project):
     agents = project / "AGENTS.md"
     agents.write_text("# My rules\nBe kind.\n\n" + agents.read_text() + "\n## After\nMore of mine.\n")
-    praxis("init")
-    praxis("init")
+    git(project, "commit", "-qam", "my own rules")
+    assert praxis("init")[0] == 0
+    assert praxis("init")[0] == 0
     text = agents.read_text()
     assert text.startswith("# My rules\nBe kind.")
     assert text.count(instructions.START) == 1 and text.count(instructions.END) == 1

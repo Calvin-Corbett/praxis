@@ -20,11 +20,37 @@ def _is_absolute(text: str) -> bool:
     return bool(_DRIVE.match(text)) or text.startswith(("/", "\\\\"))
 
 
+def _here_in(roots: list[Path]) -> str:
+    """Where the current folder is inside the project ('' at the top), so `scripts/` + `a.gd` means
+    scripts/a.gd, the way a terminal would read it. The innermost matching folder wins."""
+    try:
+        here = Path.cwd().resolve()
+    except OSError:
+        return ""
+    best: tuple[int, str] | None = None
+    for root in roots:
+        try:
+            rel = here.relative_to(root.resolve())
+        except (ValueError, OSError):
+            continue
+        depth = len(root.resolve().parts)
+        if best is None or depth > best[0]:
+            best = (depth, rel.as_posix())
+    if best is None or best[1] == ".":
+        return ""
+    return best[1]
+
+
 def normalize(path: str, roots: list[Path]) -> str:
-    """Turn what a person or agent typed into a project path, or explain why it is not one."""
+    """Turn what a person or agent typed into a project path, or explain why it is not one. A relative path is
+    read from the current folder when that folder is inside the project (or inside an agent's folder)."""
     text = path.strip().strip('"').strip("'")
     if not text:
         raise PraxisError("An empty file name was given.")
+    if not _is_absolute(text):
+        here = _here_in(roots)
+        if here:
+            text = f"{here}/{text}"
     if _is_absolute(text):
         target = Path(text).resolve()
         for root in roots:

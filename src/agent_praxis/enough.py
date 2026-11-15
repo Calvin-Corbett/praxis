@@ -8,12 +8,13 @@ better than the one before does Praxis pause it and say what it needs.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import re
 
 _PYTEST = re.compile(r"(\d+) (failed|errors?)\b")
-_NODE = re.compile(r"^(?:FAILED|ERROR)\b", re.M)
-_ERRORISH = re.compile(r"\b(error|failed|failure|exception)\b", re.I)
-_NOISE = re.compile(r"0x[0-9a-f]+|\d+(\.\d+)?|[A-Za-z]:\\[^\s]*|/[^\s]*/", re.I)
+_NODE = re.compile(r"^(?:FAILED|ERROR)\b", re.MULTILINE)
+_ERRORISH = re.compile(r"\b(error|failed|failure|exception)\b", re.IGNORECASE)
+_NOISE = re.compile(r"0x[0-9a-f]+|\d+(\.\d+)?|[A-Za-z]:\\[^\s]*|/[^\s]*/", re.IGNORECASE)
 
 
 def problem_count(text: str) -> int | None:
@@ -52,7 +53,7 @@ def should_pause(recent: list, limit: int) -> str | None:
     if len(run) < limit:
         return None
     tries = list(reversed(run[:limit]))  # oldest first
-    if not all(no_better(a, b) for a, b in zip(tries, tries[1:])):
+    if not all(no_better(a, b) for a, b in itertools.pairwise(tries)):
         return None
     last = tries[-1]
     same = len({t["signature"] for t in tries}) == 1

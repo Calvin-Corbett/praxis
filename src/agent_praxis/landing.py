@@ -5,8 +5,10 @@ Steps, all while holding this agent's turn in the landing line:
 2. Refuse if the agent changed files another agent holds.
 3. Put the agent's work on top of the newest main version (rebase, or merge if praxis.toml says so).
 4. Run the project's check command in the agent's folder.
-5. Only if it passes, move the main branch forward to the agent's work.
-A failure at any step leaves the agent's work exactly where it was and prints why.
+5. Only if it passes, and the folder still holds exactly the commit that was checked, move the main branch
+   forward to the agent's work. Main only ever moves forward: it never loses a commit that already landed.
+A failure at any step lands nothing and prints why. The agent's saved work is always kept (after step 3 it sits
+on top of the newest main version).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import time
 from pathlib import Path
 
 from agent_praxis import enough, gitops, paths
-from agent_praxis.agents import Ctx, done, need_agent
+from agent_praxis.agents import Ctx, done, need_agent, off_branch
 from agent_praxis.errors import PraxisError
 from agent_praxis.landing_queue import Ticket
 
@@ -41,6 +43,9 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
             f"{name}'s folder has a half-finished git rebase or merge. Finish it (fix the files, then "
             "`git rebase --continue`), or cancel it (`git rebase --abort`), then land again."
         )
+    problem = off_branch(row, folder)
+    if problem:
+        raise PraxisError(f"{problem}\nNothing was landed.")
     ctx.store.touch(name)
     if gitops.commit(folder, f"{row['task']} (by {name})"):
         ctx.say("Saved your changes as a commit.")
@@ -73,6 +78,7 @@ def _turn(ctx: Ctx, row, folder: Path) -> bool:
         problem = _integrate(ctx, row, folder)
         if problem is not None:  # a clash, already recorded and explained
             return problem
+        checked = gitops.rev(folder, "HEAD")
         log = None
         if ctx.cfg.check.strip():
             ctx.say(f"Running the check: {ctx.cfg.check}")
@@ -84,12 +90,15 @@ def _turn(ctx: Ctx, row, folder: Path) -> bool:
                              f"The check failed, so nothing landed. The end of its output:\n{tail}\n"
                              f"Full output: {log}\nFix the problem in your folder, then land again.",
                              problems=count, log=log, sig_text=output)
+            moved = _changed_during_check(ctx, row, folder, checked)
+            if moved:
+                return _fail(ctx, row, "changed-during-check", "files changed while the check ran", moved)
         if gitops.rev(root, f"refs/heads/{main}") != base:
             ctx.say("The main version changed while the check ran. Doing it again on top of the newest version.")
             continue
-        advanced = _advance(ctx, row, base)
+        advanced = _advance(ctx, row, base, checked)
         if advanced is not True:
-            return _fail(ctx, row, "main-folder", "the main project folder had clashing unsaved changes", advanced)
+            return _fail(ctx, row, "main-folder", "the main version could not be moved forward safely", advanced)
         tip = gitops.rev(root, f"refs/heads/{main}")
         checked = "check passed" if ctx.cfg.check.strip() else "no check is set, so nothing was tested"
         with ctx.store.write() as db:
@@ -152,7 +161,7 @@ def _integrate(ctx: Ctx, row, folder: Path):
 
 def _run_check(ctx: Ctx, row, folder: Path) -> tuple[bool, str, str]:
     env = dict(os.environ, PRAXIS_AGENT=row["name"])
-    proc = subprocess.run(ctx.cfg.check, shell=True, cwd=str(folder), env=env,
+    proc = subprocess.run(ctx.cfg.check, shell=True, check=False, cwd=str(folder), env=env,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)  # no time limit, on purpose
     output = proc.stdout.decode("utf-8", errors="replace")
     logs = ctx.store.dir / "logs"
@@ -162,21 +171,54 @@ def _run_check(ctx: Ctx, row, folder: Path) -> tuple[bool, str, str]:
     return proc.returncode == 0, output, str(log)
 
 
-def _advance(ctx: Ctx, row, base: str):
-    """Move main to the agent's work. True when done, else the plain reason it could not."""
-    main = ctx.cfg.main_branch
-    target = gitops.rev(ctx.repo.root, f"refs/heads/{row['branch']}")
-    where = gitops.branch_checked_out_at(ctx.repo.root, main)
+def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | None:
+    """None when the folder still holds exactly the commit that was checked; else what changed, in plain words.
+    Landing a commit the check did not see would make "the check passed" untrue."""
+    if gitops.rev(folder, "HEAD") != checked:
+        return ("A new commit was made in the folder while the check ran, so the check did not test what would "
+                "land. Nothing landed. Land again (and do not change the folder while a landing runs).")
+    tracked = gitops.dirty_files(folder, untracked=False)
+    if tracked:
+        return ("These files changed while the check ran, so the check may not have tested what would land:\n"
+                + "\n".join(f"  - {p}" for p in tracked[:20])
+                + "\nNothing landed. If an agent edited them, land again once it stops. If the check itself rewrites "
+                "them every time, commit them once or add them to .gitignore, then land again.")
+    new = gitops.dirty_files(folder)
+    if new:
+        ctx.say("Note: the check created new files that git does not ignore. They were not landed: "
+                + ", ".join(new[:8]) + (f" and {len(new) - 8} more" if len(new) > 8 else ""))
+        ctx.say("If they are build output, add them to .gitignore, or the next `praxis land` will save them.")
+    return None
+
+
+def _advance(ctx: Ctx, row, base: str, target: str):
+    """Move main forward to the checked commit. True when done, else the plain reason it could not."""
+    main, root = ctx.cfg.main_branch, ctx.repo.root
+    if not gitops.is_ancestor(root, base, target):
+        return (f"The work is not built on top of the newest {main}, so moving {main} to it would drop commits "
+                f"that already landed. Praxis did not move {main}. Land again.")
+    rebasing = gitops.branch_being_rebased(root, main)
+    if rebasing is not None:
+        return (f"{main} is in the middle of a git rebase in {rebasing}. Moving it now would break that rebase. "
+                "This needs the human: finish it (`git rebase --continue`) or cancel it (`git rebase --abort`), "
+                "then land again.")
+    where = gitops.branch_checked_out_at(root, main)
     if where is None:
-        gitops.git(["update-ref", f"refs/heads/{main}", target, base], ctx.repo.root)
+        gitops.git(["update-ref", f"refs/heads/{main}", target, base], root)
         return True
     proc = gitops.git(["merge", "--ff-only", "-q", target], where, check=False)
     if proc.returncode == 0:
         return True
-    return ("Your work passed, but it could not be put into the main project folder, because that folder has "
-            f"unsaved changes to the same files ({where}). Praxis did not overwrite them.\n"
-            f"git said: {(proc.stderr or proc.stdout).strip()}\n"
-            "This needs the human: save (commit) or undo the changes made directly in the main folder, then land again.")
+    said = (proc.stderr or proc.stdout).strip()
+    clashing = set(gitops.dirty_files(where)) & set(gitops.changed_files(root, base, target))
+    if clashing:
+        return ("Your work passed, but it could not be put into the main project folder, because that folder has "
+                f"unsaved changes to the same files ({where}): {', '.join(sorted(clashing)[:8])}. "
+                "Praxis did not overwrite them.\n"
+                "This needs the human: save (commit) or undo the changes made directly in the main folder, "
+                "then land again.")
+    return (f"Your work passed, but git could not move the main project folder ({where}) forward. "
+            f"Praxis changed nothing there.\ngit said: {said}\nThis needs the human.")
 
 
 def _fail(ctx: Ctx, row, kind: str, summary: str, detail: str, problems: int | None = None,

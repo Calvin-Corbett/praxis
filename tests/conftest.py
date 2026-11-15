@@ -26,7 +26,7 @@ sys.exit(1 if bad else 0)
 
 
 def git(cwd, *args) -> str:
-    proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+    proc = subprocess.run(["git", *args], check=False, cwd=str(cwd), capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 

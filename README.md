@@ -68,7 +68,9 @@ Praxis looks at the folder, recognises Unity, Unreal, Godot or a web game, and w
   game still works. Praxis guesses one when it can. If it leaves it empty, ask an agent:
   *"Set the check line in praxis.toml to a command that builds or tests this project."*
 - A section in `AGENTS.md` and `CLAUDE.md` that tells every agent the rules. Anything already in those
-  files is kept.
+  files is kept, line endings included. If you have changed either file and not committed the change yet,
+  Praxis stops and asks you to commit it first, so it never commits your own unfinished notes. A file your
+  project tells git to ignore is left alone.
 
 **2. Start two agents.** Each one gets a name, a task and the files it will touch:
 
@@ -94,7 +96,10 @@ AGENTS.md tell it to). Praxis tests the work and adds it to the main version onl
 If two agents finish at once, the second simply waits its turn.
 
 **5. Finish.** When a task is done and landed, the agent (or you) runs `praxis done <name>`. That frees its
-files and removes its folder. Praxis refuses if anything has not landed yet, so nothing is lost.
+files and removes its folder. Praxis refuses if anything has not landed yet, so nothing is lost. Files in the
+folder that git ignores are not thrown away either: caches your tools rebuild by themselves (like `.godot/`,
+`Library/` or `node_modules/`) are removed, and everything else is moved to `.git/praxis/kept/`, and Praxis
+says so.
 
 ---
 
@@ -131,8 +136,8 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis resume <agent>` | You answered; the agent may carry on. |
 | `praxis release-stale [agent...]` | Free the files of agents that went quiet for a long time. |
 
-File names can be written with `/` or `\`, and upper/lower case does not matter. They are relative to the
-project folder.
+File names can be written with `/` or `\`, and upper/lower case does not matter. They are read from the
+folder you are in, the way a terminal reads them (so from `scripts/`, `player.gd` means `scripts/player.gd`).
 
 ---
 
@@ -169,6 +174,20 @@ agent has to redo its change on the newest version. Claiming asset files first p
 Someone edited files directly in your main game folder, outside any agent folder. Save (commit) or undo those
 changes, then land again. Tip: let only agents change files, each in its own folder.
 
+**"files changed while the check ran"**
+The agent's folder changed during the check, so the check may not have tested what would land, and nothing
+landed. Usually an agent kept editing during a landing: land again once it stops. If your check itself
+rewrites some files every time it runs, commit those files once or add them to `.gitignore`.
+
+**"... is not on any branch (a 'detached HEAD')" or "is on the branch ..., but its work must be on praxis/..."**
+The agent switched branches in its folder. Praxis will not land or remove that folder until its work is back
+on its own branch, so nothing gets skipped. The message gives the exact command when there is a safe one.
+`praxis abandon <name>` also keeps everything, on `praxis-saved/...` branches.
+
+**"... is in the middle of a git rebase"**
+Someone started a `git rebase` of the main branch in the main folder and it has not finished. Finish it
+(`git rebase --continue`) or cancel it (`git rebase --abort`), then land again.
+
 **"Could not remove the folder ... a program has files open in it"**
 Close the editor, game engine or terminal that is open in that agent's folder, then run the command again.
 
@@ -188,11 +207,14 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 
 - `praxis.toml`, `AGENTS.md`, `CLAUDE.md`: in your project, committed so every agent folder has them.
 - Claims, locks, the landing line and the history: in `.git/praxis/`, never committed.
+- Ignored files kept from removed agent folders: in `.git/praxis/kept/`. Delete them when you no longer need
+  them.
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import
   copies of your project). Change this with `worktree_root` in praxis.toml.
 - Each agent works on its own git branch, `praxis/<name>`.
 
-Praxis never pushes anything to the internet, and never deletes work that has not landed without saying so.
+Praxis never pushes anything to the internet, and never deletes work that has not landed. What it removes is
+either already in the main version or a cache your tools rebuild, and it tells you when it does.
 
 ## License
 

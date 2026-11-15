@@ -123,8 +123,11 @@ def parse_toml(text: str) -> dict:
     the simple `key = value` lines Praxis writes (strings, numbers, true/false, lists of strings)."""
     try:
         import tomllib  # type: ignore[import-not-found]
-    except ImportError:  # Python 3.10
-        return _mini_toml(text)
+    except ImportError:  # Python 3.10: the same reader, installed as tomli
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        except ImportError:
+            return _mini_toml(text)
     try:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:

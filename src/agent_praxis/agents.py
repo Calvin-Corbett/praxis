@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +18,13 @@ from agent_praxis.store import Store
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 BRANCH_PREFIX = "praxis/"
 ARCHIVE_PREFIX = "praxis-saved/"
+# Ignored folders that tools rebuild by themselves (engine import caches, build output). `done` deletes these;
+# every other ignored file in an agent's folder is moved somewhere safe instead, because it may be someone's work.
+REBUILT_BY_TOOLS = {
+    ".godot", ".import", "library", "temp", "obj", "logs", "intermediate", "deriveddatacache", "saved", "binaries",
+    "build", "builds", "dist", "out", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".venv", "venv", ".gradle", ".vs", ".idea", "target",
+}
 
 
 @dataclass
@@ -103,19 +112,22 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str]) -> Path:
     main = ctx.cfg.main_branch
     if not gitops.rev(ctx.repo.root, f"refs/heads/{main}"):
         raise PraxisError(f"The main branch {main!r} does not exist. Fix main_branch in praxis.toml.")
-    wanted = _dedupe([paths.normalize(p, [ctx.repo.root]) for p in wanted_raw])
+    wanted = _dedupe([paths.normalize(p, _roots(ctx)) for p in wanted_raw])
     folder = ctx.cfg.worktree_dir(ctx.repo.root) / name
     branch = BRANCH_PREFIX + name
     if folder.exists() and any(folder.iterdir()):
         raise PraxisError(f"The folder {folder} already exists and is not empty. Move it away or pick another name.")
     now = time.time()
-    with ctx.store.write() as db:  # claims first, so two agents racing for the same files cannot both get them
-        lines = _conflicts(ctx, db, name, wanted)
-        if lines:
-            raise _refuse(name, lines)
-        db.execute("INSERT INTO agents (name, task, branch, worktree, started, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
-                   (name, task.strip(), branch, str(folder), now, now))
-        _insert_claims(db, ctx.cfg, name, wanted)
+    try:
+        with ctx.store.write() as db:  # claims first, so two agents racing for the same files cannot both get them
+            lines = _conflicts(ctx, db, name, wanted)
+            if lines:
+                raise _refuse(name, lines)
+            db.execute("INSERT INTO agents (name, task, branch, worktree, started, last_seen) "
+                       "VALUES (?, ?, ?, ?, ?, ?)", (name, task.strip(), branch, str(folder), now, now))
+            _insert_claims(db, ctx.cfg, name, wanted)
+    except sqlite3.IntegrityError:  # another `praxis start` with the same name won the race
+        raise PraxisError(f"{name} was started by someone else at the same moment. Pick another name.") from None
     try:
         folder.parent.mkdir(parents=True, exist_ok=True)
         if gitops.branch_exists(ctx.repo.root, branch):
@@ -182,19 +194,43 @@ def unclaim(ctx: Ctx, name: str, wanted_raw: list[str]) -> None:
 
 
 def unlanded(ctx: Ctx, row) -> tuple[int, list[str]]:
-    """(commits not yet on the main branch, files changed but not saved) for an agent."""
+    """(commits not yet on the main branch, files changed but not saved) for an agent. Commits count whether they
+    are on the agent's branch or only in its folder (made on another branch, or with no branch at all)."""
     folder = Path(row["worktree"])
     dirty = gitops.dirty_files(folder) if folder.is_dir() else []
-    ahead = 0
-    if gitops.branch_exists(ctx.repo.root, row["branch"]):
-        ahead = gitops.commits_ahead(ctx.repo.root, ctx.cfg.main_branch, row["branch"])
+    tips = [gitops.rev(ctx.repo.root, f"refs/heads/{row['branch']}")]
+    if folder.is_dir():
+        tips.append(gitops.rev(folder, "HEAD"))
+    ahead = gitops.commits_not_in(ctx.repo.root, tips, [f"refs/heads/{ctx.cfg.main_branch}"])
     return ahead, dirty
+
+
+def off_branch(row, folder: Path) -> str | None:
+    """Why the agent's folder is not on its own branch, or None when it is. Praxis only lands, and only removes
+    folders, from the agent's own branch, so work made anywhere else is never skipped or thrown away."""
+    on = gitops.current_branch(folder)
+    if on == row["branch"]:
+        return None
+    where = f"on the branch {on}" if on else "not on any branch (git calls this a 'detached HEAD')"
+    tip = gitops.rev(folder, f"refs/heads/{row['branch']}")
+    head = gitops.rev(folder, "HEAD")
+    if tip and head and gitops.is_ancestor(folder, tip, head):
+        fix = (f"Everything on {row['branch']} is also here, so in that folder run:\n"
+               f"  git switch -C {row['branch']}\n"
+               "That puts this work on the right branch without losing anything.")
+    else:
+        fix = (f"Its work there and its work on {row['branch']} have gone separate ways. This needs the human: "
+               f"combine them on {row['branch']} (for example `git switch {row['branch']}` and then `git merge` the "
+               "other work), or run `praxis abandon` to keep both on saved branches.")
+    return f"{row['name']}'s folder {folder} is {where}, but its work must be on {row['branch']}.\n{fix}"
 
 
 def _remove_folder(ctx: Ctx, row) -> None:
     folder = Path(row["worktree"])
     if folder.exists():
-        proc = gitops.git(["worktree", "remove", "--force", str(folder)], ctx.repo.root, check=False)
+        if folder.is_dir():
+            _keep_ignored(ctx, row, folder)
+        proc = gitops.git(["worktree", "remove", str(folder)], ctx.repo.root, check=False)
         if proc.returncode != 0 and folder.exists():
             raise PraxisError(
                 f"Could not remove the folder {folder}. A program (an editor, the game engine, a terminal) "
@@ -202,6 +238,37 @@ def _remove_folder(ctx: Ctx, row) -> None:
                 f"Details: {(proc.stderr or '').strip()}"
             )
     gitops.git(["worktree", "prune"], ctx.repo.root, check=False)
+
+
+def _keep_ignored(ctx: Ctx, row, folder: Path) -> None:
+    """Before a folder is removed: delete the caches tools rebuild, and move every other ignored file to a
+    safe place, so nothing that might be someone's work disappears silently."""
+    rebuilt, kept = [], []
+    for rel in gitops.ignored_entries(folder):
+        clean = rel.rstrip("/")
+        parts = clean.split("/")
+        (rebuilt if any(p.casefold() in REBUILT_BY_TOOLS for p in parts) else kept).append(clean)
+    if rebuilt:
+        ctx.say("Removing tool caches that rebuild themselves: " + ", ".join(rebuilt[:8])
+                + (f" and {len(rebuilt) - 8} more" if len(rebuilt) > 8 else ""))
+    if not kept:
+        return
+    dest = ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}"
+    for rel in kept:
+        target = dest / rel
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(folder / rel), str(target))
+        except OSError as exc:
+            raise PraxisError(
+                f"Could not move {rel} out of {folder} before removing the folder ({exc}). A program probably has "
+                f"it open. Close it and run the same command again. The folder was not removed; anything already "
+                f"moved is in {dest}"
+            ) from exc
+    more = f" and {len(kept) - 5} more" if len(kept) > 5 else ""
+    ctx.say(f"{len(kept)} file(s) git ignores were in {row['name']}'s folder ({', '.join(kept[:5])}{more}). "
+            f"They were not deleted: they are kept in {dest}")
+    ctx.say("Delete that folder when you no longer need them.")
 
 
 def _forget(ctx: Ctx, name: str) -> None:
@@ -213,6 +280,11 @@ def _forget(ctx: Ctx, name: str) -> None:
 
 def done(ctx: Ctx, name: str) -> None:
     row = need_agent(ctx, name)
+    folder = Path(row["worktree"])
+    if folder.is_dir():
+        problem = off_branch(row, folder)
+        if problem:
+            raise PraxisError(f"{problem}\nNothing was removed.")
     ahead, dirty = unlanded(ctx, row)
     if ahead or dirty:
         parts = []
@@ -235,26 +307,38 @@ def abandon(ctx: Ctx, name: str) -> str | None:
     """Stop an agent. Unlanded work is never deleted: it is saved on a branch, and the branch is named."""
     row = need_agent(ctx, name)
     folder = Path(row["worktree"])
+    root, main = ctx.repo.root, f"refs/heads/{ctx.cfg.main_branch}"
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    saved: list[str] = []
     if folder.is_dir():
         gitops.abort_operation(folder)
         if gitops.dirty_files(folder):
             gitops.commit(folder, f"praxis: unfinished work by {row['name']}, saved when it was abandoned")
+        head = gitops.rev(folder, "HEAD")
+        tip = gitops.rev(root, f"refs/heads/{row['branch']}")
+        if head and head != tip and gitops.commits_not_in(root, [head], [main, tip]):
+            # Work made off the agent's branch: give it a branch of its own BEFORE the folder goes.
+            other = f"{ARCHIVE_PREFIX}{row['name']}-{stamp}-folder"
+            gitops.git(["branch", other, head], root)
+            saved.append(other)
     ahead, _ = unlanded(ctx, row)
+    branch_ahead = gitops.commits_not_in(root, [gitops.rev(root, f"refs/heads/{row['branch']}")], [main])
     _remove_folder(ctx, row)
-    saved = None
-    if ahead:
-        saved = f"{ARCHIVE_PREFIX}{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}"
-        gitops.git(["branch", "-m", row["branch"], saved], ctx.repo.root)
+    if branch_ahead:
+        on_branch = f"{ARCHIVE_PREFIX}{row['name']}-{stamp}"
+        gitops.git(["branch", "-m", row["branch"], on_branch], root)
+        saved.insert(0, on_branch)
     else:
-        gitops.git(["branch", "-D", row["branch"]], ctx.repo.root, check=False)
+        gitops.git(["branch", "-D", row["branch"]], root, check=False)
     _forget(ctx, row["name"])
     ctx.say(f"{row['name']} has stopped. Its claims and locks are released and its folder is removed.")
     if saved:
-        ctx.say(f"Its unfinished work ({ahead} saved change(s)) was NOT deleted. It is kept on the branch {saved}.")
+        ctx.say(f"Its unfinished work ({ahead} saved change(s)) was NOT deleted. It is kept on the branch "
+                f"{' and the branch '.join(saved)}.")
         ctx.say("To pick it up again, ask an agent to look at that branch.")
     else:
         ctx.say("It had no unfinished work, so nothing needed saving.")
-    return saved
+    return saved[0] if saved else None
 
 
 def blocked(ctx: Ctx, name: str, reason: str) -> None:

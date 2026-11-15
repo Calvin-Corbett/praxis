@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-praxis"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lets several AI coding agents (Claude Code, Codex, Cursor, any CLI agent) work on one git project without breaking each other's work."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,7 +18,9 @@ classifiers = [
     "Environment :: Console",
     "Topic :: Software Development :: Version Control :: Git",
 ]
-dependencies = []
+dependencies = [
+    "tomli>=1.1; python_version < \"3.11\"",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

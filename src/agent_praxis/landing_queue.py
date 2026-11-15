@@ -62,7 +62,7 @@ class Ticket:
     def _file(self, token: str) -> Path:
         return self.dir / f"{token}.lock"
 
-    def __enter__(self) -> Ticket:
+    def __enter__(self) -> Ticket:  # noqa: PYI034 - typing.Self needs Python 3.11
         self.dir.mkdir(parents=True, exist_ok=True)
         # Lock the file BEFORE the row exists, so nobody can ever see this ticket while it looks dead.
         self.handle = open(self._file(self.token), "a+b")
@@ -83,16 +83,13 @@ class Ticket:
         if not path.exists():
             return False
         try:
-            handle = open(path, "a+b")
+            with open(path, "a+b") as handle:
+                if _try_lock(handle):
+                    _unlock(handle)
+                    return False
+                return True
         except OSError:
             return True  # cannot even open it: someone is using it
-        try:
-            if _try_lock(handle):
-                _unlock(handle)
-                return False
-            return True
-        finally:
-            handle.close()
 
     def _wait(self) -> None:
         told = None

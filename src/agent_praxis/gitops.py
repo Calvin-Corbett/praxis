@@ -24,7 +24,7 @@ def git(args: list[str], cwd: Path | str, check: bool = True) -> subprocess.Comp
     env["LC_ALL"] = env.get("LC_ALL", "C")
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+            ["git", *args], check=False, cwd=str(cwd), capture_output=True, text=True,
             encoding="utf-8", errors="replace", env=env,
         )
     except FileNotFoundError as exc:
@@ -111,9 +111,11 @@ def current_branch(cwd: Path | str) -> str | None:
     return proc.stdout.strip() or None
 
 
-def dirty_files(cwd: Path | str) -> list[str]:
-    """Changed, new or deleted files that are not committed yet (ignored files do not count)."""
-    raw = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd).stdout
+def dirty_files(cwd: Path | str, untracked: bool = True) -> list[str]:
+    """Changed, new or deleted files that are not committed yet (ignored files do not count).
+    With untracked=False, only files git already tracks."""
+    mode = "--untracked-files=all" if untracked else "--untracked-files=no"
+    raw = git(["status", "--porcelain=v1", "-z", mode], cwd).stdout
     parts = raw.split("\0")
     files: list[str] = []
     i = 0
@@ -143,7 +145,7 @@ def commit(cwd: Path | str, message: str, paths: list[str] | None = None) -> boo
         git(["add", "--", *paths], cwd)
     else:
         git(["add", "-A"], cwd)
-    staged = git(["diff", "--cached", "--quiet"], cwd, check=False)
+    staged = git(["diff", "--cached", "--quiet", *(["--", *paths] if paths else [])], cwd, check=False)
     has_head = rev(cwd, "HEAD") is not None
     if has_head and staged.returncode == 0:
         return False
@@ -154,6 +156,47 @@ def commit(cwd: Path | str, message: str, paths: list[str] | None = None) -> boo
 
 def commits_ahead(cwd: Path | str, base: str, branch: str) -> int:
     return int(out(["rev-list", "--count", f"{base}..{branch}"], cwd) or 0)
+
+
+def commits_not_in(cwd: Path | str, tips: list[str], base: list[str]) -> int:
+    """How many commits reachable from any of *tips* are not reachable from any of *base*."""
+    tips = [t for t in tips if t]
+    if not tips:
+        return 0
+    return int(out(["rev-list", "--count", *tips, "--not", *[b for b in base if b]], cwd) or 0)
+
+
+def is_ancestor(cwd: Path | str, older: str, newer: str) -> bool:
+    return git(["merge-base", "--is-ancestor", older, newer], cwd, check=False).returncode == 0
+
+
+def ignored_entries(cwd: Path | str) -> list[str]:
+    """Ignored files and folders (a wholly ignored folder is one entry ending in '/')."""
+    raw = git(["status", "--porcelain=v1", "-z", "--ignored"], cwd).stdout
+    return [item[3:] for item in raw.split("\0") if item.startswith("!! ")]
+
+
+def is_ignored(cwd: Path | str, path: str) -> bool:
+    return git(["check-ignore", "-q", "--", path], cwd, check=False).returncode == 0
+
+
+def branch_being_rebased(cwd: Path | str, branch: str) -> Path | None:
+    """The folder where *branch* is in the middle of a rebase (git then shows that folder as 'detached')."""
+    for entry in worktrees_at(cwd):
+        folder = Path(entry["worktree"])
+        if not folder.is_dir():
+            continue
+        for name in ("rebase-merge/head-name", "rebase-apply/head-name"):
+            proc = git(["rev-parse", "--git-path", name], folder, check=False)
+            path = Path(proc.stdout.strip())
+            if not path.is_absolute():
+                path = folder / path
+            try:
+                if path.read_text(encoding="utf-8").strip() == f"refs/heads/{branch}":
+                    return folder
+            except OSError:
+                continue
+    return None
 
 
 def changed_files(cwd: Path | str, base: str, branch: str) -> list[str]:

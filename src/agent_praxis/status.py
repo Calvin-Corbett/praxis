@@ -68,7 +68,7 @@ def render(ctx: Ctx) -> str:
             if dirty:
                 work.append(f"{len(dirty)} file(s) being edited")
             out.append("      work: " + ("; ".join(work) if work else "nothing new since its last landing"))
-        except Exception:  # a damaged folder must not hide the rest of the page
+        except Exception:  # noqa: BLE001 - a damaged folder must not hide the rest of the page
             out.append("      work: (could not read its folder)")
         out.append(f"      last sign of work: {ago(last_activity(ctx, a), now)}")
     out.append("")

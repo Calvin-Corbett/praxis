@@ -130,9 +130,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Praxis: {exc}", file=sys.stderr, flush=True)
         return 1
     except KeyboardInterrupt:
-        print("Praxis: stopped. Nothing was half-done: any landing in progress was undone.", file=sys.stderr)
+        print("Praxis: stopped. A landing that was in progress was undone. Run `praxis status` to see where things are.",
+              file=sys.stderr)
         return 130
-    except Exception as exc:  # last resort: still say something a person can act on
+    except Exception as exc:  # noqa: BLE001 - last resort: still say something a person can act on
         print(f"Praxis hit a problem it did not expect: {exc}", file=sys.stderr)
         if os.environ.get("PRAXIS_DEBUG"):
             traceback.print_exc()

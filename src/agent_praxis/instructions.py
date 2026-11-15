@@ -38,22 +38,26 @@ only changes the text between the two praxis marker lines.)
 8. If you are stuck (the same failure keeps coming back, or you need a decision from
    the human), STOP. Run `praxis blocked <your-name> "<what you need>"` and tell the human.
    Do not keep retrying the same thing.
-9. Never run `git push`, `git reset --hard`, `git clean`, or delete branches or folders
-   Praxis made. Praxis handles all of that.
+9. Stay on the branch Praxis gave you (`praxis/<your-name>`): do not switch, create or delete
+   branches. Never run `git push`, `git reset --hard`, `git clean`, or delete folders Praxis
+   made. Praxis handles all of that.
 
 Run `praxis status` at any time to see who is working on what."""
 
 
-def block() -> str:
-    return f"{START}\n{BODY}\n{END}\n"
+def block(nl: str = "\n") -> str:
+    return f"{START}\n{BODY}\n{END}\n".replace("\n", nl)
 
 
 def write_into(path: Path) -> str:
-    """Add or refresh the Praxis section in *path*. Returns 'created', 'added' or 'updated'."""
+    """Add or refresh the Praxis section in *path*. Returns 'created', 'added', 'updated' or 'unchanged'.
+    An existing file keeps its own line endings (Windows CRLF or LF)."""
     if not path.exists():
         path.write_text(block(), encoding="utf-8", newline="\n")
         return "created"
-    text = path.read_text(encoding="utf-8")
+    with open(path, encoding="utf-8", newline="") as handle:  # newline="": see the file's real line endings
+        text = handle.read()
+    nl = "\r\n" if "\r\n" in text else "\n"
     begin, end = text.find(START), text.find(END)
     if begin != -1 and end > begin:
         tail = text[end + len(END):]
@@ -61,11 +65,11 @@ def write_into(path: Path) -> str:
             tail = tail[2:]
         elif tail.startswith("\n"):
             tail = tail[1:]
-        new = text[:begin] + block() + tail
+        new = text[:begin] + block(nl) + tail
         if new == text:
             return "unchanged"
         path.write_text(new, encoding="utf-8", newline="")
         return "updated"
-    sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
-    path.write_text(text + sep + block(), encoding="utf-8", newline="")
+    sep = "" if not text or text.endswith(nl + nl) else (nl if text.endswith(nl) else nl + nl)
+    path.write_text(text + sep + block(nl), encoding="utf-8", newline="")
     return "added"
