@@ -204,7 +204,7 @@ def _put_back_check_rewrites(ctx: Ctx, row, folder: Path) -> None:
                if paths.matches_from_top(p, ctx.cfg.check_may_change)]
     if not changed:
         return
-    dest = ctx.store.dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}-check"
+    dest = paths.fresh_folder(ctx.store.dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}-check")
     for rel in changed:
         src = folder / rel
         if src.is_file():

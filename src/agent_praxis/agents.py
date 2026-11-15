@@ -250,7 +250,7 @@ def _remove_folder(ctx: Ctx, row) -> None:
                     "submodule: `git push`), then run the same command again. Nothing was removed."
                 )
             _refuse_unsaved_submodules(row, folder, subs)
-            dest = ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}"
+            dest = paths.fresh_folder(ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}")
             _keep_ignored(ctx, row, folder, dest)
             for sub in subs:  # deinit below deletes a submodule's files, ignored ones included
                 _keep_ignored(ctx, row, folder / sub, dest / sub, label=f"{row['name']}'s submodule {sub}")

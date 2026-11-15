@@ -79,6 +79,15 @@ def normalize(path: str, roots: list[Path]) -> str:
     return "/".join(parts) if parts else "."
 
 
+def fresh_folder(base: Path) -> Path:
+    """*base*, or base-2, base-3... when a folder of that name already exists, so kept copies never mix."""
+    found, n = base, 2
+    while found.exists():
+        found = base.with_name(f"{base.name}-{n}")
+        n += 1
+    return found
+
+
 def exists_in(path: str, roots: list[Path]) -> bool:
     """True when *path* (from the top of the project) is a file or folder in any of *roots*."""
     for root in roots:
