@@ -103,7 +103,8 @@ check = {_q(cfg.check)}
 # Files the check itself rewrites every time it runs (for example "ProjectSettings/*.asset").
 # Normally a landing stops if any committed file changes while the check runs, because then the
 # check may not have tested what would land. Files listed here are put back to their committed
-# version after the check instead, and the landing goes ahead.
+# version after every check instead (a copy is kept in .git/praxis/kept), and the landing goes ahead.
+# Paths are read from the top of the project: * stays inside one folder, ** spans folders.
 check_may_change = [{", ".join(_q(p) for p in cfg.check_may_change)}]
 
 # Files git cannot merge (scenes, levels, models, textures, sounds).

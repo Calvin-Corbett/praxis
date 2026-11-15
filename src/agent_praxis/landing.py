@@ -14,6 +14,7 @@ on top of the newest main version).
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -83,6 +84,7 @@ def _turn(ctx: Ctx, row, folder: Path) -> bool:
         if ctx.cfg.check.strip():
             ctx.say(f"Running the check: {ctx.cfg.check}")
             passed, output, log = _run_check(ctx, row, folder)
+            _put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
             if not passed:
                 count = enough.problem_count(output)
                 tail = "\n".join(output.rstrip().splitlines()[-TAIL_LINES:])
@@ -178,12 +180,6 @@ def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | No
         return ("A new commit was made in the folder while the check ran, so the check did not test what would "
                 "land. Nothing landed. Land again (and do not change the folder while a landing runs).")
     tracked = gitops.dirty_files(folder, untracked=False)
-    allowed = [p for p in tracked if paths.is_asset(p, ctx.cfg.check_may_change)]
-    if allowed:  # the check rewrites these by itself; the commit being landed is the one that was checked
-        gitops.git(["restore", "--worktree", "--source=HEAD", "--", *allowed], folder)
-        ctx.say("Put back files the check rewrote (check_may_change in praxis.toml): " + ", ".join(allowed[:8])
-                + (f" and {len(allowed) - 8} more" if len(allowed) > 8 else ""))
-        tracked = [p for p in tracked if p not in allowed]
     if tracked:
         return ("These files changed while the check ran, so the check may not have tested what would land:\n"
                 + "\n".join(f"  - {p}" for p in tracked[:20])
@@ -197,6 +193,26 @@ def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | No
                 + ", ".join(new[:8]) + (f" and {len(new) - 8} more" if len(new) > 8 else ""))
         ctx.say("If they are build output, add them to .gitignore, or the next `praxis land` will save them.")
     return None
+
+
+def _put_back_check_rewrites(ctx: Ctx, row, folder: Path) -> None:
+    """Put the files the check is allowed to rewrite (check_may_change) back to their committed version. A copy
+    of each changed one is kept first, in case an agent had edited it during the check."""
+    if not ctx.cfg.check_may_change:
+        return
+    changed = [p for p in gitops.dirty_files(folder, untracked=False)
+               if paths.matches_from_top(p, ctx.cfg.check_may_change)]
+    if not changed:
+        return
+    dest = ctx.store.dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}-check"
+    for rel in changed:
+        src = folder / rel
+        if src.is_file():
+            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest / rel)
+    gitops.git(["restore", "--worktree", "--source=HEAD", "--", *changed], folder)
+    ctx.say("Put back files the check rewrote (check_may_change in praxis.toml): " + ", ".join(changed[:8])
+            + (f" and {len(changed) - 8} more" if len(changed) > 8 else "") + f". Copies as the check left them: {dest}")
 
 
 def _advance(ctx: Ctx, row, base: str, target: str):

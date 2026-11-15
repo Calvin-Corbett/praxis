@@ -242,14 +242,18 @@ def _remove_folder(ctx: Ctx, row) -> None:
     if folder.exists():
         if folder.is_dir():
             subs = gitops.submodules(folder)
-            stranded = [s for s in subs if gitops.commits_only_here(folder / s)]
+            stranded = [s for s in subs if gitops.commits_only_here(folder / s, ctx.repo.root / s)]
             if stranded:
                 raise PraxisError(
                     f"These submodules in {row['name']}'s folder have commits that exist nowhere else: "
                     + ", ".join(stranded) + ". Removing the folder would lose them. Push them first (in each "
                     "submodule: `git push`), then run the same command again. Nothing was removed."
                 )
-            _keep_ignored(ctx, row, folder)
+            _refuse_unsaved_submodules(row, folder, subs)
+            dest = ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}"
+            _keep_ignored(ctx, row, folder, dest)
+            for sub in subs:  # deinit below deletes a submodule's files, ignored ones included
+                _keep_ignored(ctx, row, folder / sub, dest / sub, label=f"{row['name']}'s submodule {sub}")
             if subs:  # git will not remove a folder with checked-out submodules; their work was checked above
                 gitops.git(["submodule", "deinit", "--all", "--force"], folder, check=False)
         # --force only gets past git's "contains submodules" refusal: the folder was checked clean above.
@@ -269,9 +273,23 @@ def _remove_folder(ctx: Ctx, row) -> None:
     gitops.git(["worktree", "prune"], ctx.repo.root, check=False)
 
 
-def _keep_ignored(ctx: Ctx, row, folder: Path) -> None:
-    """Before a folder is removed: delete the caches tools rebuild, and move every other ignored file to a
-    safe place, so nothing that might be someone's work disappears silently."""
+def _refuse_unsaved_submodules(row, folder: Path, subs: list[str] | None = None) -> None:
+    """Edits inside a submodule belong to the submodule's own git project: Praxis cannot save them for you."""
+    subs = gitops.submodules(folder) if subs is None else subs
+    unsaved = [s for s in subs if gitops.dirty_files(folder / s)]
+    if unsaved:
+        raise PraxisError(
+            f"These submodules in {row['name']}'s folder have changes that are not committed inside them: "
+            + ", ".join(unsaved) + ". Removing the folder would lose them, and Praxis cannot save changes "
+            "inside a submodule for you. In each one, commit (and push) the changes, or undo them, then run "
+            "the same command again. Nothing was removed."
+        )
+
+
+def _keep_ignored(ctx: Ctx, row, folder: Path, dest: Path, label: str | None = None) -> None:
+    """Before a folder is removed: delete the caches tools rebuild, and move every other ignored file to *dest*,
+    so nothing that might be someone's work disappears silently."""
+    label = label or f"{row['name']}'s folder"
     engines, _assets, _check = config.detect(folder)
     top_caches = set().union(*(ENGINE_CACHES.get(e, set()) for e in engines)) if engines else set()
     rebuilt, kept = [], []
@@ -287,7 +305,6 @@ def _keep_ignored(ctx: Ctx, row, folder: Path) -> None:
                 + (f" and {len(rebuilt) - 8} more" if len(rebuilt) > 8 else ""))
     if not kept:
         return
-    dest = ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}"
     for rel in kept:
         target = dest / rel
         try:
@@ -300,7 +317,7 @@ def _keep_ignored(ctx: Ctx, row, folder: Path) -> None:
                 f"moved is in {dest}"
             ) from exc
     more = f" and {len(kept) - 5} more" if len(kept) > 5 else ""
-    ctx.say(f"{len(kept)} file(s) git ignores were in {row['name']}'s folder ({', '.join(kept[:5])}{more}). "
+    ctx.say(f"{len(kept)} file(s) git ignores were in {label} ({', '.join(kept[:5])}{more}). "
             f"They were not deleted: they are kept in {dest}")
     ctx.say("Delete that folder when you no longer need them.")
 
@@ -325,6 +342,7 @@ def done(ctx: Ctx, name: str) -> None:
         problem = off_branch(row, folder)
         if problem:
             raise PraxisError(f"{problem}\nNothing was removed.")
+        _refuse_unsaved_submodules(row, folder)
     ahead, dirty = unlanded(ctx, row)
     if ahead or dirty:
         parts = []
@@ -351,6 +369,7 @@ def abandon(ctx: Ctx, name: str) -> str | None:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     saved: list[str] = []
     if folder.is_dir():
+        _refuse_unsaved_submodules(row, folder)  # before anything changes: those edits cannot be saved for you
         gitops.abort_operation(folder)
         if gitops.dirty_files(folder):
             gitops.commit(folder, f"praxis: unfinished work by {row['name']}, saved when it was abandoned")

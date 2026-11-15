@@ -104,6 +104,37 @@ def overlaps(a: str, b: str) -> bool:
     return covers(a, b) or covers(b, a)
 
 
+def _glob(pattern: str) -> re.Pattern:
+    """A path pattern read from the top of the project: `*` and `?` stay inside one folder, `**` spans folders."""
+    p = key(pattern.strip().replace("\\", "/"))
+    p = p[2:] if p.startswith("./") else p.lstrip("/")
+    out, i = [], 0
+    while i < len(p):
+        if p.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif p.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif p[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif p[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(p[i]))
+            i += 1
+    return re.compile("".join(out))
+
+
+def matches_from_top(path: str, patterns: list[str]) -> bool:
+    """True when *path* matches one of *patterns* as a whole path from the top of the project. Unlike asset
+    patterns, "*.cfg" means a .cfg file at the top only; "**/*.cfg" means any .cfg file."""
+    full = key(path)
+    return any(_glob(pattern).fullmatch(full) for pattern in patterns if pattern.strip())
+
+
 def is_asset(path: str, patterns: list[str]) -> bool:
     """True when *path* is a file type that git cannot merge (it matches one of the asset patterns)."""
     full = key(path)

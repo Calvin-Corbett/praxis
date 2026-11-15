@@ -184,12 +184,18 @@ def submodules(cwd: Path | str) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def commits_only_here(submodule: Path) -> bool:
-    """True when a submodule's checked-out commit is on none of its remotes (it exists only in this folder)."""
+def commits_only_here(submodule: Path, elsewhere: Path | None = None) -> bool:
+    """True when a submodule's checked-out commit exists only in this folder: it is on none of the submodule's
+    remote branches or tags, and the same submodule in *elsewhere* (the main folder) does not have it either."""
     if not submodule.is_dir():
         return False
-    proc = git(["rev-list", "--count", "HEAD", "--not", "--remotes"], submodule, check=False)
-    return proc.returncode == 0 and proc.stdout.strip() not in ("", "0")
+    proc = git(["rev-list", "--count", "HEAD", "--not", "--remotes", "--tags"], submodule, check=False)
+    if proc.returncode != 0 or proc.stdout.strip() in ("", "0"):
+        return False
+    head = rev(submodule, "HEAD")
+    known_elsewhere = (head and elsewhere is not None and (elsewhere / ".git").exists()
+                       and git(["cat-file", "-e", f"{head}^{{commit}}"], elsewhere, check=False).returncode == 0)
+    return not known_elsewhere
 
 
 def is_ignored(cwd: Path | str, path: str) -> bool:

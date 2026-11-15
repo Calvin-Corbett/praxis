@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from conftest import edit, folder, git, praxis
 
@@ -341,6 +342,125 @@ def test_done_explains_a_half_finished_rebase_instead_of_wrong_advice(project):
     code, out = praxis("done", "alice")
     assert code == 1 and "half-finished git rebase" in out and "git switch" not in out
     assert wt.is_dir()
+
+
+def _addon(project, tmp_path, tag: bool = False):
+    """A small git project used as a submodule at addons/thing (optionally pinned to a tag on no branch)."""
+    lib = tmp_path / "addon"
+    lib.mkdir()
+    git(lib, "init", "-q", "-b", "main")
+    git(lib, "config", "user.name", "Test")
+    git(lib, "config", "user.email", "test@example.com")
+    (lib / "addon.gd").write_text("extends Node\n")
+    git(lib, "add", "-A")
+    git(lib, "commit", "-qm", "addon")
+    if tag:
+        git(lib, "switch", "-q", "--detach")
+        (lib / "addon.gd").write_text("extends Node\nvar released = 1\n")
+        git(lib, "commit", "-qam", "release")
+        git(lib, "-c", "tag.gpgSign=false", "tag", "v1")
+        git(lib, "switch", "-q", "main")
+    git(project, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "addons/thing")
+    if tag:
+        git(project / "addons" / "thing", "checkout", "-q", "v1")
+        git(project, "add", "addons/thing")
+    git(project, "commit", "-qm", "add an addon")
+
+
+def _start_with_addon(project, agent: str) -> Path:
+    praxis("start", agent, "work", "scripts/player.gd")
+    wt = folder(project, agent)
+    git(wt, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+    return wt
+
+
+def test_abandon_never_deletes_uncommitted_edits_inside_a_submodule(project, tmp_path):
+    _addon(project, tmp_path)
+    wt = _start_with_addon(project, "alice")
+    (wt / "addons" / "thing" / "addon.gd").write_text("extends Node\nvar my_edit = 1\n")
+    for command in ("abandon", "done"):
+        code, out = praxis(command, "alice")
+        assert code == 1 and "not committed inside them: addons/thing" in out, (command, out)
+        assert "my_edit" in (wt / "addons" / "thing" / "addon.gd").read_text()
+
+
+def test_ignored_files_inside_a_submodule_are_kept(project, tmp_path):
+    _addon(project, tmp_path)
+    wt = _start_with_addon(project, "alice")
+    sub = wt / "addons" / "thing"
+    exclude = gitops.out(["rev-parse", "--git-path", "info/exclude"], sub)
+    exclude_path = Path(exclude) if Path(exclude).is_absolute() else sub / exclude
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    exclude_path.write_text("*.local\n")
+    (sub / "my.local").write_text("my addon settings")
+    code, out = praxis("done", "alice")
+    assert code == 0, out
+    kept = list((project / ".git" / "praxis" / "kept").glob("*/addons/thing/my.local"))
+    assert kept and kept[0].read_text() == "my addon settings", out
+
+
+def test_a_submodule_pinned_to_a_tag_does_not_block_done(project, tmp_path):
+    _addon(project, tmp_path, tag=True)
+    _start_with_addon(project, "alice")
+    code, out = praxis("done", "alice")
+    assert code == 0, out
+
+
+def test_check_may_change_reads_paths_from_the_top_and_keeps_a_copy(project):
+    (project / "rewrite.py").write_text(
+        'import pathlib\n'
+        'pathlib.Path("imported.cfg").write_text("stamp\\n")\n'
+        'pathlib.Path("scripts/level.cfg").write_text("the check wrote this\\n")\n'
+    )
+    (project / "imported.cfg").write_text("committed\n")
+    (project / "scripts" / "level.cfg").write_text("real level settings\n")
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "a check that rewrites two cfg files")
+    cfg = config.load(project)
+    cfg.check = f'"{sys.executable}" rewrite.py'
+    cfg.check_may_change = ["*.cfg"]  # the top-level one only, not scripts/level.cfg
+    (project / config.FILE_NAME).write_text(config.render(cfg))
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    edit(folder(project, "alice") / "scripts" / "player.gd", "extends Node\nvar speed = 20\n")
+
+    code, out = praxis("land", "alice")
+    assert code == 2 and "scripts/level.cfg" in out, "a file deeper down is not covered by *.cfg"
+    assert "Put back files the check rewrote" in out and "imported.cfg" in out
+    copies = list((project / ".git" / "praxis" / "kept").glob("alice-*-check/imported.cfg"))
+    assert copies and copies[0].read_text() == "stamp\n"
+
+
+def test_a_failed_check_never_leaves_its_rewrites_to_be_landed(project):
+    (project / "rewrite.py").write_text(
+        'import pathlib, sys\n'
+        'pathlib.Path("imported.cfg").write_text("stamp\\n")\n'
+        'sys.exit(1 if "BROKEN" in pathlib.Path("scripts/player.gd").read_text() else 0)\n'
+    )
+    (project / "imported.cfg").write_text("committed\n")
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "a check that stamps a file")
+    cfg = config.load(project)
+    cfg.check = f'"{sys.executable}" rewrite.py'
+    cfg.check_may_change = ["imported.cfg"]
+    (project / config.FILE_NAME).write_text(config.render(cfg))
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    wt = folder(project, "alice")
+    edit(wt / "scripts" / "player.gd", "BROKEN\n")
+    assert praxis("land", "alice")[0] == 2
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 20\n")
+    code, out = praxis("land", "alice")
+    assert code == 0, out
+    assert git(project, "show", "main:imported.cfg") == "committed", "the check's stamp never landed"
+
+
+def test_patterns_from_the_top(tmp_path):
+    from agent_praxis.paths import matches_from_top
+    assert matches_from_top("imported.cfg", ["*.cfg"])
+    assert not matches_from_top("scripts/level.cfg", ["*.cfg"])
+    assert matches_from_top("scripts/level.cfg", ["**/*.cfg"])
+    assert matches_from_top("ProjectSettings/Graphics.asset", ["ProjectSettings/*.asset"])
+    assert not matches_from_top("Assets/ProjectSettings/x.asset", ["ProjectSettings/*.asset"])
+    assert matches_from_top("Packages/packages-lock.json", ["packages/packages-lock.json"]), "case does not matter"
 
 
 def test_unclaim_says_when_nothing_was_held(project):

@@ -180,13 +180,16 @@ changes, then land again. Tip: let only agents change files, each in its own fol
 The agent's folder changed during the check, so the check may not have tested what would land, and nothing
 landed. Usually an agent kept editing during a landing: land again once it stops. If your check itself
 rewrites some files every time it runs (some Unity and Godot builds do), list them in praxis.toml, for
-example `check_may_change = ["ProjectSettings/*.asset"]`. Praxis then puts those files back the way they were
-committed after each check, and lands. The message names the files and gives the exact line.
+example `check_may_change = ["ProjectSettings/*.asset"]`. Paths are read from the top of the project: `*` stays
+inside one folder and `**` spans folders, so `*.cfg` means only .cfg files at the top. After every check Praxis
+puts those files back the way they were committed (keeping a copy in `.git/praxis/kept/`, in case an agent had
+edited one), and lands. The message names the files and gives the exact line.
 
-**"submodules ... have commits that exist nowhere else"**
-An agent made a commit inside a submodule (an addon or plugin kept in its own git project) and never pushed
-it. Removing the folder would lose it, so Praxis stops. Push it from inside that submodule, then run the same
-command again.
+**"submodules ... have commits that exist nowhere else"** or **"... changes that are not committed inside them"**
+An agent changed something inside a submodule (an addon or plugin kept in its own git project) and did not
+commit or push it there. Removing the folder would lose it, so Praxis stops; it cannot save changes inside a
+submodule for you. Commit and push them from inside that submodule (or undo them), then run the same command
+again.
 
 **"... is not on any branch (a 'detached HEAD')" or "is on the branch ..., but its work must be on praxis/..."**
 The agent switched branches in its folder. Praxis will not land or remove that folder until its work is back
