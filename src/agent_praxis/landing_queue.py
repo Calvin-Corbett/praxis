@@ -49,6 +49,27 @@ else:
 POLL_SECONDS = 0.3
 
 
+def ticket_alive(store: Store, token: str) -> bool:
+    """True while the process that holds this ticket is still running (it keeps the ticket's file locked)."""
+    path = store.dir / "queue" / f"{token}.lock"
+    if not path.exists():
+        return False
+    try:
+        with open(path, "a+b") as handle:
+            if _try_lock(handle):
+                _unlock(handle)
+                return False
+            return True
+    except OSError:
+        return True  # cannot even open it: someone is using it
+
+
+def landing_now(store: Store, agent: str) -> bool:
+    """True when a running `praxis land` holds a place in the landing line for *agent*."""
+    return any(ticket_alive(store, row["token"])
+               for row in store.rows("SELECT token FROM queue WHERE agent = ?", (agent,)))
+
+
 class Ticket:
     """`with Ticket(store, agent, say):` returns once it is this agent's turn to land."""
 
@@ -79,17 +100,7 @@ class Ticket:
         return self
 
     def _alive(self, token: str) -> bool:
-        path = self._file(token)
-        if not path.exists():
-            return False
-        try:
-            with open(path, "a+b") as handle:
-                if _try_lock(handle):
-                    _unlock(handle)
-                    return False
-                return True
-        except OSError:
-            return True  # cannot even open it: someone is using it
+        return ticket_alive(self.store, token)
 
     def _wait(self) -> None:
         told = None

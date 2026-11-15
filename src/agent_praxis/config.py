@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 from dataclasses import dataclass, field
@@ -139,7 +140,11 @@ def parse_toml(text: str) -> dict:
     try:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        raise PraxisError(f"praxis.toml has a mistake in it: {exc}") from exc
+        hint = ""
+        if "\\" in str(exc) or "escape" in str(exc).lower():
+            hint = ("\nA backslash inside double quotes starts a code in TOML. For Windows paths use forward slashes "
+                    "(tools/build.bat), or single quotes: check = 'tools\\build.bat'")
+        raise PraxisError(f"praxis.toml has a mistake in it: {exc}{hint}") from exc
 
 
 _STRING = r'"(?:[^"\\]|\\.)*"|\'[^\']*\''
@@ -211,19 +216,60 @@ def load(root: Path) -> Config:
             f"This project is not set up for Praxis yet (there is no {FILE_NAME} in {root}).\n"
             "Run `praxis init` in the project folder first."
         )
-    data = parse_toml(path.read_text(encoding="utf-8"))
+    data = parse_toml(_read_text(path))
+    unknown = sorted(set(data) - set(_KINDS))
+    if unknown:  # a misspelled `chek = ...` must not mean "land without a check"
+        hints = []
+        for name in unknown:
+            close = difflib.get_close_matches(name, list(_KINDS), n=1)
+            hints.append(f"{name}" + (f" (did you mean {close[0]}?)" if close else ""))
+        raise PraxisError("praxis.toml has setting(s) Praxis does not know: " + ", ".join(hints)
+                          + ".\nThe settings it reads are: " + ", ".join(_KINDS) + ". Fix the name, or delete the line.")
     cfg = Config()
-    for name in ("main_branch", "check", "worktree_root", "land_method"):
-        if name in data:
-            setattr(cfg, name, str(data[name]))
-    if "assets" in data:
-        cfg.assets = [str(a) for a in data["assets"]]
-    if "check_may_change" in data:
-        cfg.check_may_change = [str(p) for p in data["check_may_change"]]
-    if "enough_after" in data:
-        cfg.enough_after = max(2, int(data["enough_after"]))
-    if "stale_after_hours" in data:
-        cfg.stale_after_hours = float(data["stale_after_hours"])
+    for name, value in data.items():
+        setattr(cfg, name, _typed(name, value))
+    cfg.enough_after = max(2, cfg.enough_after)
     if cfg.land_method not in ("rebase", "merge"):
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
+    if any(ch in cfg.check for ch in "\b\t\f\r\n\v"):
+        raise PraxisError(
+            "praxis.toml: the check line holds a hidden control character. In TOML a backslash inside double quotes "
+            r'starts a code (\b, \t), so check = "tools\build.bat" does not mean what it looks like. Use forward '
+            "slashes (tools/build.bat), or single quotes: check = 'tools\\build.bat'"
+        )
     return cfg
+
+
+# Every setting Praxis reads, with the kind of value it must be.
+_KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
+          "land_method": str, "enough_after": int, "stale_after_hours": float}
+_KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
+               int: "a whole number, like 3", float: "a number, like 24"}
+
+
+def _typed(name: str, value):
+    kind = _KINDS[name]
+    if kind is str:
+        ok = isinstance(value, str)
+    elif kind is list:
+        ok = isinstance(value, list) and all(isinstance(v, str) for v in value)
+    elif kind is int:
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    else:
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if not ok:
+        raise PraxisError(f"praxis.toml: {name} must be {_KIND_WORDS[kind]}, but it is {value!r}.")
+    return float(value) if kind is float else value
+
+
+def _read_text(path: Path) -> str:
+    """praxis.toml as text, whatever an editor saved it as (UTF-8 with or without a BOM, or UTF-16, which
+    Windows PowerShell's `>` writes)."""
+    raw = path.read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise PraxisError(f"{path} is not saved as UTF-8 text. Open it in a text editor and save it as UTF-8 "
+                          "(in Notepad: File, Save As, Encoding: UTF-8).") from None

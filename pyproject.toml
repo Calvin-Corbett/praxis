@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-praxis"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lets several AI coding agents (Claude Code, Codex, Cursor, any CLI agent) work on one git project without breaking each other's work."
 readme = "README.md"
 requires-python = ">=3.10"

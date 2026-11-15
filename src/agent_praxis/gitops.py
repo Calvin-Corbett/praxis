@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +18,7 @@ class GitError(PraxisError):
         super().__init__(f"git {' '.join(args)} did not work:\n{detail}")
 
 
-def git(args: list[str], cwd: Path | str, check: bool = True) -> subprocess.CompletedProcess:
+def git(args: list[str], cwd: Path | str, check: bool = True, stdin: str | None = None) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     env["GIT_EDITOR"] = "true"  # never open an editor and wait for a person
@@ -25,7 +26,8 @@ def git(args: list[str], cwd: Path | str, check: bool = True) -> subprocess.Comp
     try:
         proc = subprocess.run(
             ["git", *args], check=False, cwd=str(cwd), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", env=env,
+            encoding="utf-8", errors="replace", env=env, input=stdin,
+            stdin=None if stdin is not None else subprocess.DEVNULL,  # git never waits for a keyboard
         )
     except FileNotFoundError as exc:
         raise PraxisError("Praxis needs git, and git is not installed (or not on the PATH).") from exc
@@ -177,11 +179,76 @@ def ignored_entries(cwd: Path | str) -> list[str]:
 
 
 def submodules(cwd: Path | str) -> list[str]:
-    """Checked-out submodules in this folder, nested ones included, as paths relative to it."""
-    if not (Path(cwd) / ".gitmodules").is_file():
-        return []
-    proc = git(["submodule", "foreach", "--quiet", "--recursive", "echo $displaypath"], cwd, check=False)
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    """Checked-out submodules in this folder, nested ones included, as paths relative to it. Also counts a git
+    project that was committed as a bare pointer without being listed in .gitmodules."""
+    found: list[str] = []
+    if (Path(cwd) / ".gitmodules").is_file():
+        proc = git(["submodule", "foreach", "--quiet", "--recursive", "echo $displaypath"], cwd, check=False)
+        found = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    for path in gitlinks(cwd):
+        if path not in found and (Path(cwd) / path / ".git").exists():
+            found.append(path)
+    return found
+
+
+def gitlinks(cwd: Path | str, ref: str | None = None) -> list[str]:
+    """Paths stored as pointers to another git project's commit (submodules), in the index or in *ref*."""
+    args = ["ls-tree", "-r", "-z", "--full-tree", ref] if ref else ["ls-files", "-s", "-z"]
+    proc = git(args, cwd, check=False)
+    found = []
+    for item in proc.stdout.split("\0"):
+        meta, _, path = item.partition("\t")
+        if meta.startswith("160000") and path:
+            found.append(path)
+    return found
+
+
+def listed_submodules(cwd: Path | str, ref: str = "HEAD") -> set[str]:
+    """Submodule paths that .gitmodules (as committed in *ref*) names."""
+    proc = git(["config", "--blob", f"{ref}:.gitmodules", "--get-regexp", r"^submodule\..*\.path$"], cwd, check=False)
+    return {line.split(" ", 1)[1].strip() for line in proc.stdout.splitlines() if " " in line}
+
+
+def embedded_projects(cwd: Path | str) -> list[str]:
+    """New folders in *cwd* that are git projects of their own (they hold a .git). `git add` would store each
+    as a bare pointer to commits that exist only in that folder."""
+    raw = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd).stdout  # stops at a nested .git
+    found = []
+    for item in raw.split("\0"):
+        if item.startswith("?? ") and item.endswith("/") and (Path(cwd) / item[3:] / ".git").exists():
+            found.append(item[3:].rstrip("/"))
+    return found
+
+
+def changed_between(cwd: Path | str, older: str, newer: str) -> list[str]:
+    """Files that differ between two commits: what moving from *older* to *newer* changes."""
+    raw = git(["diff", "--name-only", "-z", older, newer], cwd).stdout
+    return [p for p in raw.split("\0") if p]
+
+
+def same_path(a: Path | str, b: Path | str) -> bool:
+    """True when both name the same place (macOS may spell an accented letter two ways: compare both alike)."""
+    try:
+        one, two = (unicodedata.normalize("NFC", os.path.normcase(str(Path(p).resolve()))) for p in (a, b))
+    except OSError:
+        return False
+    return one == two
+
+
+def is_worktree_of(folder: Path, common: Path) -> bool:
+    """True only when *folder* is itself the top of a git working folder whose shared git folder is *common*.
+    Git searches parent folders for a project, so a folder that lost its own .git would otherwise make git
+    act on whatever project happens to contain it."""
+    if not (folder / ".git").exists():
+        return False
+    top = git(["rev-parse", "--show-toplevel"], folder, check=False)
+    shared = git(["rev-parse", "--git-common-dir"], folder, check=False)
+    if top.returncode != 0 or shared.returncode != 0:
+        return False
+    shared_path = Path(shared.stdout.strip())
+    if not shared_path.is_absolute():
+        shared_path = folder / shared_path
+    return same_path(top.stdout.strip(), folder) and same_path(shared_path, common)
 
 
 def commits_only_here(submodule: Path, elsewhere: Path | None = None) -> bool:

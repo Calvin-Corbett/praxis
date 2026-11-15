@@ -8,6 +8,7 @@ upper/lower case, because Windows and macOS treat "Levels/One.tscn" and "levels/
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from pathlib import Path, PurePosixPath
 
@@ -75,6 +76,12 @@ def normalize(path: str, roots: list[Path]) -> str:
                 raise PraxisError(f"{path} points outside your project folder.")
             parts.pop()
             continue
+        if os.name == "nt":
+            if ":" in piece:  # "file.txt::$DATA" and the like name a hidden part of a file on Windows
+                raise PraxisError(f"{path}: ':' cannot be part of a file name on Windows.")
+            piece = piece.rstrip(" .")  # Windows ignores trailing dots and spaces: "a.txt." is "a.txt"
+            if not piece:
+                continue
         parts.append(piece)
     return "/".join(parts) if parts else "."
 

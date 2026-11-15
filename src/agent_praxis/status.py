@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import time
 
-from agent_praxis.agents import Ctx, last_activity, stale_agents, unlanded
+from agent_praxis.agents import Ctx, agent_here, folder_state, last_activity, stale_agents, unlanded
+from agent_praxis.landing_queue import ticket_alive
 
 
 def ago(stamp: float, now: float | None = None) -> str:
@@ -27,7 +28,11 @@ def render(ctx: Ctx) -> str:
     store, cfg = ctx.store, ctx.cfg
     agents = store.agents()
     claims = store.claims()
-    out: list[str] = [f"Praxis status for {ctx.repo.name}  (main version: branch {cfg.main_branch})", ""]
+    out: list[str] = [f"Praxis status for {ctx.repo.name}  (main version: branch {cfg.main_branch})"]
+    here = agent_here(ctx)
+    if here:
+        out.append(f"You are in {here}'s folder. The main project folder is {ctx.repo.root}")
+    out.append("")
 
     paused = [a for a in agents if a["paused"]]
     stale = stale_agents(ctx, now)
@@ -61,16 +66,27 @@ def render(ctx: Ctx) -> str:
         if a["released"]:
             out.append(f"      note: {a['released']}")
         try:
+            where = folder_state(ctx, a)
+            if where == "missing":
+                out.append(f"      PROBLEM: its folder is gone. To keep what it saved: praxis abandon {a['name']}")
+            elif where == "partial":
+                out.append("      PROBLEM: its folder was only partly removed (a program had a file open). Close it, "
+                           f"delete what is left of {a['worktree']}, then: praxis done {a['name']}")
+            elif where == "foreign":
+                out.append("      PROBLEM: its folder is no longer a git folder of this project. Move it somewhere "
+                           f"safe, then: praxis abandon {a['name']}")
             ahead, dirty = unlanded(ctx, a)
             work = []
             if ahead:
                 work.append(f"{ahead} saved change(s) not landed yet")
             if dirty:
                 work.append(f"{len(dirty)} file(s) being edited")
-            out.append("      work: " + ("; ".join(work) if work else "nothing new since its last landing"))
+            landed = store.row("SELECT 1 FROM landings WHERE agent = ? AND ok = 1 AND at >= ?", (a["name"], a["started"]))
+            idle = "nothing new since its last landing" if landed else "no changes yet"
+            out.append("      work: " + ("; ".join(work) if work else idle))
+            out.append(f"      last sign of work: {ago(last_activity(ctx, a), now)}")
         except Exception:  # noqa: BLE001 - a damaged folder must not hide the rest of the page
             out.append("      work: (could not read its folder)")
-        out.append(f"      last sign of work: {ago(last_activity(ctx, a), now)}")
     out.append("")
 
     locks = [c for c in claims if c["is_asset"]]
@@ -82,7 +98,10 @@ def render(ctx: Ctx) -> str:
     line = store.rows("SELECT * FROM queue ORDER BY id")
     out.append("LANDING LINE" if line else "LANDING LINE: empty")
     for n, q in enumerate(line, 1):
-        if q["started"]:
+        if not ticket_alive(store, q["token"]):
+            out.append(f"  {n}. {q['agent']}: its landing stopped part-way (its process ended). The next landing "
+                       "clears this; nothing landed from it.")
+        elif q["started"]:
             out.append(f"  {n}. {q['agent']} is landing now (started {ago(q['started'], now)})")
         else:
             out.append(f"  {n}. {q['agent']} is waiting (joined {ago(q['enqueued'], now)})")

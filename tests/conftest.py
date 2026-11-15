@@ -13,7 +13,7 @@ import pytest
 
 from agent_praxis.cli import main
 
-SRC = Path(__file__).resolve().parents[1] / "src"
+SRC = Path(os.environ.get("PRAXIS_TEST_SRC") or Path(__file__).resolve().parents[1] / "src")  # set it to test another copy
 # The check fails when any script contains the word BROKEN, and prints one line per broken file.
 CHECK_PY = """\
 import pathlib, sys

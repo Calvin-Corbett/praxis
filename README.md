@@ -47,6 +47,11 @@ Check it worked:
 praxis --version
 ```
 
+If the terminal says `praxis` is not found, the install worked but its folder is not on your PATH yet. With
+pipx, run `pipx ensurepath`, then close the terminal and open a new one. With pip, the warning it printed names
+the folder to add. Until then, `python -m agent_praxis` works everywhere `praxis` does
+(for example `python -m agent_praxis status`).
+
 The package is called `agent-praxis`; the command is `praxis`.
 
 ---
@@ -54,7 +59,10 @@ The package is called `agent-praxis`; the command is `praxis`.
 ## Five-minute walkthrough with two agents
 
 Your game lives in a folder that uses git (if it does not yet: open a terminal in the folder and run
-`git init`, then `git add -A` and `git commit -m "first version"`).
+`git init`, then `git add -A` and `git commit -m "first version"`). Commit everything you want agents to see
+before you start: each agent's folder is made from what is committed, so a file you never committed is not in
+it. `praxis init` warns you if it finds any. A `.gitignore` that leaves out the engine's caches (Unity
+`Library/`, Godot `.godot/`, `node_modules/`...) keeps those out of the main version too.
 
 **1. Set the project up (once).** Open a terminal in your game folder and run:
 
@@ -83,6 +91,11 @@ praxis start codex-1 "add a second level" scenes/level2.tscn art/level2
 Praxis prints a folder for each agent (next to your project, in `<your game>-praxis/`). Open Claude Code in
 the first folder and Codex in the second, and give each one its task.
 
+An agent's folder holds only what is committed, so things git ignores are not in it: installed packages
+(`node_modules/`), and engine caches such as Unity's `Library/` or Godot's `.godot/`. If your check needs
+them, the agent installs them in its own folder first (`npm install`), or the engine rebuilds them on the
+first check, which can take a while for a big Unity project. The agent rules say so.
+
 **3. Watch.** Any time, run:
 
 ```
@@ -94,14 +107,22 @@ needs you.
 
 **4. The agents land their work.** When an agent finishes, it runs `praxis land <its name>` (the rules in
 AGENTS.md tell it to). Praxis tests the work and adds it to the main version only if the check passes.
-If two agents finish at once, the second simply waits its turn.
+If two agents finish at once, the second simply waits its turn. A landing can take minutes; the rules tell
+agents to give it a long time limit and never stop it part-way. The check never gets a keyboard, so a build
+script that ends with `pause` simply carries on.
 
-**5. Finish.** When a task is done and landed, the agent (or you) runs `praxis done <name>`. That frees its
-files and removes its folder. Praxis refuses if anything has not landed yet, so nothing is lost. Files in the
+**5. Finish.** When a task is done and landed, the agent (or you) runs `praxis done <name>` from the main
+project folder (a folder cannot be removed while a terminal is in it; Praxis says so if you try). That frees
+its files and removes its folder. Praxis refuses if anything has not landed yet, so nothing is lost. Files in the
 folder that git ignores are not thrown away either. Only caches that rebuild by themselves are removed: the
 engine's own cache folders at the top of the agent's folder (Godot `.godot/`, Unity `Library/`, `Temp/` and
 `obj/`, Unreal `Intermediate/` and `DerivedDataCache/`) and any `node_modules/` or `__pycache__/`.
-Everything else is moved to `.git/praxis/kept/`, and Praxis says so.
+Everything else is moved to `.git/praxis/kept/`, and Praxis says so. A link inside the folder (for example one
+`npm link` or `npm install file:...` made to a library somewhere else on your computer) is removed as a link:
+what it points to is never touched.
+
+**6. Put the work on GitHub (if you use it).** Praxis never pushes. Landed work is in your main folder's
+branch; push it from there as usual (`git push`) whenever you like.
 
 ---
 
@@ -200,15 +221,46 @@ on its own branch, so nothing gets skipped. The message gives the exact command 
 Someone started a `git rebase` of the main branch in the main folder and it has not finished. Finish it
 (`git rebase --continue`) or cancel it (`git rebase --abort`), then land again.
 
-**"Could not remove the folder ... a program has files open in it"**
-Close the editor, game engine or terminal that is open in that agent's folder, then run the command again.
+**"Another program is using ...'s folder" or "You are inside ...'s folder"**
+A folder cannot be removed while something is open in it. Close the editor, game engine, file window or
+terminal that is open in that agent's folder (or `cd` to the main project folder), then run the command
+again. Praxis checks this before it touches anything, so nothing was changed.
+
+**"These files are held by another agent, so this work cannot land"**
+The agent changed a file another agent is working on. Landing never changes a file someone else holds, and
+that includes putting it back to an older version. In the agent's folder, `git checkout <main branch> --
+<file>` takes the newest version of that file; then land again.
+
+**"You are in ...'s folder, but asked to ... another agent"**
+A command was typed with another agent's name from inside one agent's folder, which is almost always a typo.
+Use your own name, or run it from the main project folder if you really meant the other agent.
+
+**"... are separate git projects (each has its own .git)"**
+An agent cloned or created a git project inside its folder. git cannot store that as part of your project
+(it would land as an empty, broken folder), so Praxis stops. Delete the `.git` folder inside it so its files
+become part of your project, or move it out. To keep it as a separate project on purpose, add it as a git
+submodule yourself.
+
+**"praxis.toml has setting(s) Praxis does not know" or "... must be ..."**
+A setting's name is misspelled or its value has the wrong form. Praxis stops rather than guess, so a typo in
+`check` can never mean "land without testing". The message names the setting and the form it needs. For a
+Windows path in the check line, use forward slashes (`tools/build.bat`) or single quotes
+(`check = 'tools\build.bat'`): inside double quotes a backslash starts a code.
+
+**"... looks like a project of its own, but it has no git of its own"**
+You ran `praxis init` in a game folder that is part of a bigger git project. Praxis works on a whole git
+project, so it stops and asks. If the game belongs in that project, run `praxis init` at the top of it (the
+folder with `.git`). If it does not (say, a home folder kept in git), give the game folder its own git first.
 
 **An agent's folder was deleted by hand**
-Run `praxis abandon <name>`. Anything it had saved is kept on a `praxis-saved/...` branch.
+`praxis status` shows a PROBLEM line for it. Run `praxis abandon <name>`. Anything it had saved is kept on a
+`praxis-saved/...` branch, and the message says how to carry on from it.
 
 **Waiting in line takes a long time**
 That is normal: one landing at a time, and each runs the full check. Praxis never gives up waiting. If a
-landing process was closed or crashed, the next one in line notices and carries on.
+landing process was closed or crashed, the next one in line notices and carries on (`praxis status` shows a
+stopped landing as stopped). On Windows, a check whose landing was stopped is stopped with it. Problems in the
+main folder never count against an agent's tries, so they never get an agent paused.
 
 **Something else**
 Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, and show them to an agent.

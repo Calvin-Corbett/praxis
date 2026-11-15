@@ -11,6 +11,9 @@ import hashlib
 import itertools
 import re
 
+# Landing failures caused by the main folder or by someone outside Praxis. Pausing the agent would not help.
+NOT_THE_AGENTS = frozenset({"main-folder", "busy-main"})
+
 _PYTEST = re.compile(r"(\d+) (failed|errors?)\b")
 _NODE = re.compile(r"^(?:FAILED|ERROR)\b", re.MULTILINE)
 _ERRORISH = re.compile(r"\b(error|failed|failure|exception)\b", re.IGNORECASE)
@@ -44,11 +47,14 @@ def no_better(previous, current) -> bool:
 
 
 def should_pause(recent: list, limit: int) -> str | None:
-    """*recent* is this agent's landing tries, newest first. Returns the plain reason to pause, or None."""
+    """*recent* is this agent's landing tries, newest first. Returns the plain reason to pause, or None.
+    Failures that are not the agent's doing (see NOT_THE_AGENTS) neither count nor break a run."""
     run = []
     for attempt in recent:
         if attempt["ok"]:
             break
+        if attempt["kind"] in NOT_THE_AGENTS:
+            continue
         run.append(attempt)
     if len(run) < limit:
         return None
