@@ -458,16 +458,166 @@ def test_done_refuses_while_a_file_in_the_folder_is_open(project):
     assert praxis("done", "alice")[0] == 0
 
 
-def test_a_removal_cut_short_is_explained_not_called_foreign(project):
+def test_a_removal_cut_short_is_explained_not_called_foreign(project, monkeypatch):
+    from agent_praxis import gitops
     praxis("start", "alice", "jump", "scripts/player.gd")
     wt = folder(project, "alice")
-    (wt / ".git").unlink()  # what git leaves when it stops part-way: no .git link and no record of the folder
-    git(project, "worktree", "prune")
+    real = gitops.git
+
+    def git_stops_part_way(args, cwd, check=True, stdin=None):
+        if args[:2] == ["worktree", "remove"]:  # git drops its record and the .git link, then a file is in use
+            (wt / ".git").unlink()
+            real(["worktree", "prune"], cwd, check=False)
+            return subprocess.CompletedProcess(args, 1, "", "error: failed to delete: Permission denied")
+        return real(args, cwd, check, stdin)
+
+    monkeypatch.setattr(gitops, "git", git_stops_part_way)
+    code, out = praxis("done", "alice")
+    assert code == 1 and "Could not remove" in out
+    monkeypatch.setattr(gitops, "git", real)
     code, out = praxis("status")
-    assert code == 0 and "partly removed" in out
+    assert code == 0 and "partly removed" in out and "look through" in out, out
+    assert "no changes yet" not in out and "unknown" in out, out
     code, out = praxis("done", "alice")
     assert code == 1 and "stopped part-way" in out and "praxis/alice" in out
     assert (wt / "scripts" / "player.gd").is_file(), "Praxis deleted nothing itself"
+
+
+def test_a_folder_that_lost_its_git_link_another_way_is_not_called_a_cut_short_removal(project):
+    """An agent deletes its own .git file, then another agent's done runs `git worktree prune`: the folder looks
+    exactly like a removal cut short, but Praxis never started removing it, and it may hold unsaved work."""
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    praxis("start", "bob", "enemies", "scripts/enemy.gd")
+    wt = folder(project, "alice")
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 99\n")  # not saved anywhere else
+    (wt / ".git").unlink()
+    assert praxis("done", "bob")[0] == 0  # runs git worktree prune
+    code, out = praxis("status")
+    assert code == 0 and "partly removed" not in out and "delete what is left" not in out, out
+    assert "Move it somewhere safe" in out, out
+    assert "no changes yet" not in out and "unknown" in out, out
+    code, out = praxis("done", "alice")
+    assert code == 1 and "Move the folder somewhere safe" in out and "stopped part-way" not in out, out
+    assert "speed = 99" in (wt / "scripts" / "player.gd").read_text()
+
+
+def test_status_does_not_claim_a_stopped_landing_landed_nothing(project):
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    store = Store(project / ".git" / "praxis")
+    try:
+        with store.write() as db:
+            db.execute("INSERT INTO queue (agent, token, enqueued, started) VALUES ('alice', 'dead', ?, ?)",
+                       (time.time(), time.time()))
+    finally:
+        store.close()
+    code, out = praxis("status")
+    assert code == 0 and "nothing landed from it" not in out and "may not have finished" in out, out
+    assert "RECENT LANDINGS" in out and "main" in out
+
+
+def _two_steps_that_clash_only_one_at_a_time(project) -> Path:
+    """alice changes a line, then takes the newest version of it: replayed one commit at a time the first step
+    clashes, joined into one it does not."""
+    praxis("start", "alice", "jump", "scripts")
+    wt = folder(project, "alice")
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 11\n")
+    git(wt, "commit", "-qam", "faster")
+    edit(project / "scripts" / "player.gd", "extends Node\nvar speed = 20\n")
+    git(project, "commit", "-qam", "newer speed on main")
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 20\n")
+    edit(wt / "scripts" / "jump.gd", "extends Node\nvar jump = 3\n")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "take the newest speed, add jumping")
+    return wt
+
+
+def test_joining_commits_never_leaves_the_folder_off_its_branch(project, monkeypatch):
+    """A landing killed during the joined try used to leave the folder detached, and land/done then said the
+    work had gone separate ways. The joined try now runs on the agent's own branch the whole time."""
+    from agent_praxis import gitops
+    wt = _two_steps_that_clash_only_one_at_a_time(project)
+    seen = []
+    real = gitops.git
+
+    def watch(args, cwd, check=True, stdin=None):
+        if "rebase" in args and "--abort" not in args and Path(cwd) == wt:  # git itself detaches mid-rebase
+            seen.append(real(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd, check=False).stdout.strip())
+        return real(args, cwd, check, stdin)
+
+    monkeypatch.setattr(gitops, "git", watch)
+    code, out = praxis("land", "alice")
+    assert code == 0 and "together into one commit" in out, out
+    assert seen and all(b == "praxis/alice" for b in seen), seen
+    assert "jump = 3" in git(project, "show", "main:scripts/jump.gd")
+
+
+def test_a_landing_killed_during_the_joined_try_leaves_the_folder_on_its_branch(project, monkeypatch):
+    """A kill skips every cleanup step. Simulate one: the joined rebase stops, and nothing puts anything back."""
+    from agent_praxis import gitops, landing
+
+    class Killed(BaseException):
+        pass
+
+    wt = _two_steps_that_clash_only_one_at_a_time(project)
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 33\n")  # the joined rebase clashes too
+    git(wt, "commit", "-qam", "even faster")
+    original = git(wt, "rev-parse", "HEAD")
+    real, rebases = gitops.git, []
+
+    def killed_in_the_joined_rebase(args, cwd, check=True, stdin=None):
+        proc = real(args, cwd, check, stdin)
+        if "rebase" in args and "--abort" not in args and Path(cwd) == wt:
+            rebases.append(args)
+            if len(rebases) == 2:
+                raise Killed
+        return proc
+
+    cleanups = landing._back_on_branch, landing._record_if_it_landed
+    monkeypatch.setattr(gitops, "git", killed_in_the_joined_rebase)
+    monkeypatch.setattr(landing, "_back_on_branch", lambda *_a: None)
+    monkeypatch.setattr(landing, "_record_if_it_landed", lambda *_a: None)
+    with pytest.raises(Killed):
+        praxis("land", "alice")
+    # Not monkeypatch.undo(): that would also undo the project fixture's chdir.
+    monkeypatch.setattr(gitops, "git", real)
+    monkeypatch.setattr(landing, "_back_on_branch", cleanups[0])
+    monkeypatch.setattr(landing, "_record_if_it_landed", cleanups[1])
+    assert git(project, "rev-parse", "refs/praxis/joining/alice") == original, "the original commits are kept"
+    git(wt, "rebase", "--abort")  # what land says to do with a half-finished rebase
+    assert git(wt, "symbolic-ref", "--short", "HEAD") == "praxis/alice"
+    assert git(wt, "rev-parse", "HEAD^{tree}") == git(project, "rev-parse", f"{original}^{{tree}}")
+    code, out = praxis("land", "alice")
+    assert code != 0
+    assert "separate ways" not in out and "detached" not in out and "clash" in out, out
+
+
+def test_a_joined_try_that_still_clashes_puts_the_original_commits_back(project):
+    wt = _two_steps_that_clash_only_one_at_a_time(project)
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 33\n")  # now the end result clashes too
+    git(wt, "commit", "-qam", "even faster")
+    before = git(wt, "rev-parse", "HEAD")
+    code, out = praxis("land", "alice")
+    assert code != 0 and "clash" in out, out
+    assert git(wt, "rev-parse", "HEAD") == before and git(wt, "symbolic-ref", "--short", "HEAD") == "praxis/alice"
+    assert git(project, "for-each-ref", "refs/praxis/") == "", "the safety copy is cleared once it is not needed"
+
+
+def test_a_detached_folder_with_the_same_files_as_its_branch_is_put_back_not_called_separate(project):
+    """What a landing killed in the middle of the old joined try left: detached on a commit beside the branch
+    whose files are exactly the branch's."""
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    wt = folder(project, "alice")
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 42\n")
+    git(wt, "commit", "-qam", "one")
+    edit(wt / "scripts" / "player.gd", "extends Node\nvar speed = 43\n")
+    git(wt, "commit", "-qam", "two")
+    fork = git(wt, "merge-base", "HEAD", "main")
+    joined = git(wt, "commit-tree", "HEAD^{tree}", "-p", fork, "-m", "joined")
+    git(wt, "checkout", "-q", "--detach", joined)
+    code, out = praxis("land", "alice")
+    assert code == 0 and "separate ways" not in out and "same files" in out, out
+    assert "speed = 43" in (project / "scripts" / "player.gd").read_text()
+    assert git(wt, "symbolic-ref", "--short", "HEAD") == "praxis/alice"
 
 
 def test_a_helper_the_check_leaves_running_survives_a_normal_landing(project):

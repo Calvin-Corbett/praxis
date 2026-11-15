@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS queue (
     enqueued REAL NOT NULL,
     started REAL
 );
+CREATE TABLE IF NOT EXISTS removing (
+    agent TEXT PRIMARY KEY,
+    folder TEXT NOT NULL,
+    since REAL NOT NULL
+);
 """
 
 
@@ -116,3 +121,19 @@ class Store:
         if agent is None:
             return self.rows("SELECT * FROM landings ORDER BY id DESC LIMIT ?", (limit,))
         return self.rows("SELECT * FROM landings WHERE agent = ? ORDER BY id DESC LIMIT ?", (agent, limit))
+
+    # Folders Praxis itself has started to remove ------------------------------------------------------------
+
+    def mark_removing(self, agent: str, folder: str) -> None:
+        """Written before Praxis starts removing an agent's folder, so a removal cut short can be told apart from a
+        folder whose .git link went missing some other way (which may still hold unsaved work)."""
+        with self.write() as db:
+            db.execute("INSERT OR REPLACE INTO removing (agent, folder, since) VALUES (?, ?, ?)",
+                       (agent, folder, time.time()))
+
+    def clear_removing(self, agent: str) -> None:
+        with self.write() as db:
+            db.execute("DELETE FROM removing WHERE agent = ?", (agent,))
+
+    def removing(self, agent: str) -> sqlite3.Row | None:
+        return self.row("SELECT * FROM removing WHERE agent = ?", (agent,))

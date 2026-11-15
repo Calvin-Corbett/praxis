@@ -23,9 +23,11 @@ from pathlib import Path
 
 from agent_praxis import enough, gitops, paths
 from agent_praxis.agents import (
+    JOINING_PREFIX,
     Ctx,
     _foreign,
     _partial,
+    _tree,
     agent_here,
     done,
     folder_state,
@@ -65,7 +67,7 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
             f"{name}'s folder has a half-finished git rebase or merge. Finish it (fix the files, then "
             "`git rebase --continue`), or cancel it (`git rebase --abort`), then land again."
         )
-    problem = off_branch(row, folder)
+    problem = off_branch(row, folder, ctx.say)
     if problem:
         raise PraxisError(f"{problem}\nNothing was landed.")
     if landing_now(ctx.store, name):
@@ -281,18 +283,23 @@ def _rebase_as_one(ctx: Ctx, row, folder: Path) -> list[str] | None:
     fork = gitops.out(["merge-base", "HEAD", main_ref], folder)
     if gitops.commits_not_in(folder, [original], [fork]) < 2:
         return []  # one commit: joining changes nothing
-    # The joined commit is made beside the branch (commit-tree moves nothing), keeping every commit's message, and
-    # rebased on a detached copy. The agent's branch only moves at the very end, once that worked, so stopping at
-    # any point leaves it exactly as it was (see _back_on_branch).
+    # The joined commit is made beside the branch (commit-tree moves nothing), keeping every commit's message. The
+    # folder never leaves the agent's branch: the original commits are kept under a name of their own first, then
+    # the branch takes the joined commit (the same files, so nothing in the folder changes) and is rebased. If that
+    # clashes, the branch goes back to the original commits. A landing killed at any point leaves the folder on
+    # its own branch, holding either the original commits or the joined one, and the originals stay kept.
     messages = gitops.out(["log", "--reverse", "--format=%B", f"{fork}..{original}"], folder)
     joined = gitops.git([*gitops.identity_args(folder), "commit-tree", f"{original}^{{tree}}", "-p", fork],
                         folder, check=False, stdin=f"{row['task']} (by {row['name']})\n\n{messages}\n")
     if joined.returncode != 0:
         return []
-    gitops.git(["checkout", "-q", "--detach", joined.stdout.strip()], folder)  # the same files as now
+    keep = f"{JOINING_PREFIX}{row['name']}"
+    if gitops.git(["update-ref", keep, original], folder, check=False).returncode != 0:
+        return []
+    gitops.git(["reset", "-q", "--soft", joined.stdout.strip()], folder)  # the same files as now
     proc = gitops.git([*gitops.identity_args(folder), "rebase", "-q", main_ref], folder, check=False)
     if proc.returncode == 0:
-        gitops.git(["switch", "-q", "-C", row["branch"]], folder)  # now the branch takes the joined work
+        gitops.git(["update-ref", "-d", keep], folder, check=False)  # the joined work now holds them
         ctx.say("Put your saved changes together into one commit, so they fit on top of the newest version.")
         return None
     still = gitops.conflicted_files(folder)
@@ -301,11 +308,22 @@ def _rebase_as_one(ctx: Ctx, row, folder: Path) -> list[str] | None:
 
 
 def _back_on_branch(row, folder: Path) -> None:
-    """Undo a half-done rebase, and if the folder was left on a detached copy (a joining try), go back to the
-    agent's own branch. Both hold exactly the same files, so nothing in the folder changes."""
+    """Undo a half-done rebase, make sure the folder is on the agent's own branch, and if a joining try was cut
+    short, give the branch its original commits back. Each step leaves the same files in the folder."""
     gitops.abort_operation(folder)
     if gitops.current_branch(folder) != row["branch"]:
         gitops.git(["checkout", "-q", row["branch"]], folder, check=False)
+    keep = f"{JOINING_PREFIX}{row['name']}"
+    original = gitops.rev(folder, keep)
+    if original is None:
+        return
+    tip = gitops.rev(folder, "HEAD")
+    same_files = tip is not None and _tree(folder, tip) == _tree(folder, original)
+    if same_files and tip != original and gitops.current_branch(folder) == row["branch"]:
+        gitops.git(["reset", "-q", "--soft", original], folder)  # the joined commit back to the originals
+        tip = gitops.rev(folder, "HEAD")
+    if tip == original or not same_files:  # put back, or the joined work already sits on top of main
+        gitops.git(["update-ref", "-d", keep], folder, check=False)
 
 
 _KILL_ON_CLOSE, _BREAKAWAY_OK = 0x2000, 0x800

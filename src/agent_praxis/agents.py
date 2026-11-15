@@ -22,6 +22,8 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 _RESERVED = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$")
 BRANCH_PREFIX = "praxis/"
 ARCHIVE_PREFIX = "praxis-saved/"
+# While a landing tries an agent's commits joined into one, its original commits are kept under this name.
+JOINING_PREFIX = "refs/praxis/joining/"
 # The only ignored folders `done` deletes: caches an engine or tool rebuilds by itself, matched exactly. Engine
 # caches count only at the top of an agent's folder, and only for the engine found there. Every other ignored
 # file is moved to .git/praxis/kept instead, because "git ignores it" means "not shared", not "worthless".
@@ -55,7 +57,8 @@ def check_name(name: str) -> str:
 
 def folder_state(ctx: Ctx, row) -> str:
     """'ok' when the agent's folder is this project's working folder for it, 'missing' when it is gone (or only
-    an empty folder is left), 'foreign' when something else is there. Git commands only ever run in 'ok'."""
+    an empty folder is left), 'partial' when it is what is left of a removal Praxis itself started, 'foreign' when
+    something else is there. Git commands only ever run in 'ok'."""
     folder = Path(row["worktree"])
     if not folder.exists():
         return "missing"
@@ -66,9 +69,14 @@ def folder_state(ctx: Ctx, row) -> str:
             return "missing"
     except OSError:
         pass
-    if folder.is_dir() and not (folder / ".git").exists() and not any(
-            gitops.same_path(e["worktree"], folder) for e in gitops.worktrees_at(ctx.repo.root)):
-        return "partial"  # git removed its own record and the .git link, then stopped: a removal cut short
+    # No .git link and no record in git looks the same whether git stopped part-way through a removal or the link
+    # was deleted some other way and a later `git worktree prune` dropped the record. Only the first is a removal
+    # cut short, and only Praxis knows it started one: anything else may still hold unsaved work.
+    marked = ctx.store.removing(row["name"])
+    if (marked and gitops.same_path(marked["folder"], folder) and folder.is_dir()
+            and not (folder / ".git").exists()
+            and not any(gitops.same_path(e["worktree"], folder) for e in gitops.worktrees_at(ctx.repo.root))):
+        return "partial"
     return "foreign"
 
 
@@ -419,7 +427,7 @@ def unlanded(ctx: Ctx, row) -> tuple[int, list[str]]:
     return ahead, dirty
 
 
-def off_branch(row, folder: Path) -> str | None:
+def off_branch(row, folder: Path, say=None) -> str | None:
     """Why the agent's folder is not on its own branch, or None when it is. Praxis only lands, and only removes
     folders, from the agent's own branch, so work made anywhere else is never skipped or thrown away."""
     on = gitops.current_branch(folder)
@@ -428,6 +436,15 @@ def off_branch(row, folder: Path) -> str | None:
     where = f"on the branch {on}" if on else "not on any branch (git calls this a 'detached HEAD')"
     tip = gitops.rev(folder, f"refs/heads/{row['branch']}")
     head = gitops.rev(folder, "HEAD")
+    # Exactly the branch's files, only on a commit beside it (what a landing killed part-way through used to
+    # leave). Going back to the branch changes no file in the folder, and unsaved edits stay as they are.
+    if (on is None and tip and head and _tree(folder, head) == _tree(folder, tip)
+            and gitops.git(["checkout", "-q", row["branch"]], folder, check=False).returncode == 0):
+        if say:
+            say(f"{row['name']}'s folder was not on any branch, but it held the same files as {row['branch']} "
+                f"(a landing that was stopped part-way can leave it like this). Put it back on {row['branch']}; "
+                "no file changed.")
+        return None
     if tip and head and gitops.is_ancestor(folder, tip, head):
         fix = (f"Everything on {row['branch']} is also here, so in that folder run:\n"
                f"  git switch -C {row['branch']}\n"
@@ -437,6 +454,11 @@ def off_branch(row, folder: Path) -> str | None:
                f"combine them on {row['branch']} (for example `git switch {row['branch']}` and then `git merge` the "
                "other work), or run `praxis abandon` to keep both on saved branches.")
     return f"{row['name']}'s folder {folder} is {where}, but its work must be on {row['branch']}.\n{fix}"
+
+
+def _tree(folder: Path, commit: str) -> str | None:
+    proc = gitops.git(["rev-parse", "--verify", "--quiet", f"{commit}^{{tree}}"], folder, check=False)
+    return proc.stdout.strip() or None
 
 
 def _remove_folder(ctx: Ctx, row) -> None:
@@ -459,39 +481,51 @@ def _remove_folder(ctx: Ctx, row) -> None:
                 "submodule: `git push`), then run the same command again. Nothing was removed."
             )
         _refuse_unsaved_submodules(row, folder, subs)
-        dest = paths.fresh_folder(ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}")
-        _keep_ignored(ctx, row, folder, dest)
-        for sub in subs:  # deinit below deletes a submodule's files, ignored ones included
-            _keep_ignored(ctx, row, folder / sub, dest / sub, label=f"{row['name']}'s submodule {sub}")
-        if subs:  # git will not remove a folder with checked-out submodules; their work was checked above
-            gitops.git(["submodule", "deinit", "--all", "--force"], folder, check=False)
-        _unlink_links_inside(folder)  # git's own removal would step through a junction
-        if subs:  # --force also skips git's own last look for changed files: take that look here instead
-            late = [p for p in gitops.dirty_files(folder) if not any(paths.covers(s, p) for s in subs)]
-            if late:
-                raise PraxisError(f"Files changed in {row['name']}'s folder just now: {', '.join(late[:8])}. Is an "
-                                  "agent still working there? Nothing was removed. Run the same command again once "
-                                  "it has stopped.")
-        # --force only gets past git's refusal about checked-out submodules, whose work was checked above.
-        args = ["worktree", "remove", *(["--force"] if subs else []), str(folder)]
-        proc = gitops.git(args, ctx.repo.root, check=False)
-        if proc.returncode != 0 and folder.exists():
-            said = (proc.stderr or proc.stdout or "").strip()
-            if "locked" in said:
-                why = (f"git has this folder marked as locked. If nothing is using it, run "
-                       f"`git worktree unlock \"{folder}\"`, then the same command again.")
-            elif any(w in said.lower() for w in ("permission", "access", "busy", "used by another")):
-                why = ("A program (an editor, the game engine, a terminal) probably has files open in it. "
-                       "Close it and run the same command again.")
-            else:
-                why = "Run the same command again after fixing what git says below."
-            raise PraxisError(f"Could not remove the folder {folder}. {why}\ngit said: {said}")
+        ctx.store.mark_removing(row["name"], str(folder))  # from here on, a cut-short removal is known to be ours
+        try:
+            _take_folder_away(ctx, row, folder, subs)
+        except BaseException:
+            if folder.is_dir() and gitops.is_worktree_of(folder, ctx.repo.common):
+                ctx.store.clear_removing(row["name"])  # nothing was removed: the folder is an ordinary one again
+            raise
     elif folder.is_dir():  # only an empty folder is left
         try:
             folder.rmdir()
         except OSError:
             pass
     gitops.git(["worktree", "prune"], ctx.repo.root, check=False)
+    ctx.store.clear_removing(row["name"])
+
+
+def _take_folder_away(ctx: Ctx, row, folder: Path, subs: list[str]) -> None:
+    """The removal itself, once every check has passed: ignored files kept, submodules let go, folder removed."""
+    dest = paths.fresh_folder(ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}")
+    _keep_ignored(ctx, row, folder, dest)
+    for sub in subs:  # deinit below deletes a submodule's files, ignored ones included
+        _keep_ignored(ctx, row, folder / sub, dest / sub, label=f"{row['name']}'s submodule {sub}")
+    if subs:  # git will not remove a folder with checked-out submodules; their work was checked above
+        gitops.git(["submodule", "deinit", "--all", "--force"], folder, check=False)
+    _unlink_links_inside(folder)  # git's own removal would step through a junction
+    if subs:  # --force also skips git's own last look for changed files: take that look here instead
+        late = [p for p in gitops.dirty_files(folder) if not any(paths.covers(s, p) for s in subs)]
+        if late:
+            raise PraxisError(f"Files changed in {row['name']}'s folder just now: {', '.join(late[:8])}. Is an "
+                              "agent still working there? Nothing was removed. Run the same command again once "
+                              "it has stopped.")
+    # --force only gets past git's refusal about checked-out submodules, whose work was checked above.
+    args = ["worktree", "remove", *(["--force"] if subs else []), str(folder)]
+    proc = gitops.git(args, ctx.repo.root, check=False)
+    if proc.returncode != 0 and folder.exists():
+        said = (proc.stderr or proc.stdout or "").strip()
+        if "locked" in said:
+            why = (f"git has this folder marked as locked. If nothing is using it, run "
+                   f"`git worktree unlock \"{folder}\"`, then the same command again.")
+        elif any(w in said.lower() for w in ("permission", "access", "busy", "used by another")):
+            why = ("A program (an editor, the game engine, a terminal) probably has files open in it. "
+                   "Close it and run the same command again.")
+        else:
+            why = "Run the same command again after fixing what git says below."
+        raise PraxisError(f"Could not remove the folder {folder}. {why}\ngit said: {said}")
 
 
 def _refuse_unsaved_submodules(row, folder: Path, subs: list[str] | None = None) -> None:
@@ -668,6 +702,7 @@ def _forget(ctx: Ctx, name: str) -> None:
         db.execute("DELETE FROM claims WHERE agent = ?", (name,))
         db.execute("DELETE FROM agents WHERE name = ?", (name,))
         db.execute("DELETE FROM queue WHERE agent = ?", (name,))
+        db.execute("DELETE FROM removing WHERE agent = ?", (name,))
 
 
 def done(ctx: Ctx, name: str) -> None:
@@ -682,7 +717,7 @@ def done(ctx: Ctx, name: str) -> None:
                 "`git rebase --continue`), or cancel it (`git rebase --abort`), then run the same command again. "
                 "Nothing was removed."
             )
-        problem = off_branch(row, folder)
+        problem = off_branch(row, folder, ctx.say)
         if problem:
             raise PraxisError(f"{problem}\nNothing was removed.")
         refuse_links_git_walks_into(row, folder)  # first: git would count a junction's files as the agent's
@@ -701,6 +736,7 @@ def done(ctx: Ctx, name: str) -> None:
         )
     _remove_folder(ctx, row)
     gitops.git(["branch", "-D", row["branch"]], ctx.repo.root, check=False)
+    gitops.git(["update-ref", "-d", f"{JOINING_PREFIX}{row['name']}"], ctx.repo.root, check=False)  # all landed
     _forget(ctx, row["name"])
     ctx.say(f"{row['name']} is done. Its claims and locks are released and its folder is removed.")
 
@@ -740,6 +776,8 @@ def abandon(ctx: Ctx, name: str) -> str | None:
         saved.insert(0, on_branch)
     else:
         gitops.git(["branch", "-D", row["branch"]], root, check=False)
+    # A joined try's copy of the original commits holds the same files as what was just saved (or landed).
+    gitops.git(["update-ref", "-d", f"{JOINING_PREFIX}{row['name']}"], root, check=False)
     _forget(ctx, row["name"])
     gone = "its folder was already gone" if folder is None else "its folder is removed"
     ctx.say(f"{row['name']} has stopped. Its claims and locks are released and {gone}.")

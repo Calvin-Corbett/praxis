@@ -70,15 +70,18 @@ def render(ctx: Ctx) -> str:
             if where == "missing":
                 out.append(f"      PROBLEM: its folder is gone. To keep what it saved: praxis abandon {a['name']}")
             elif where == "partial":
-                out.append("      PROBLEM: its folder was only partly removed (a program had a file open). Close it, "
-                           f"delete what is left of {a['worktree']}, then: praxis done {a['name']}")
+                out.append("      PROBLEM: its folder was only partly removed (Praxis's removal stopped part-way, "
+                           f"a program had a file open). Close it, look through what is left of {a['worktree']}, delete it yourself once you are "
+                           f"sure nothing in it is needed, then: praxis done {a['name']}")
             elif where == "foreign":
                 out.append("      PROBLEM: its folder is no longer a git folder of this project. Move it somewhere "
-                           f"safe, then: praxis abandon {a['name']}")
+                           f"safe (it may still hold unsaved work), then: praxis abandon {a['name']}")
             ahead, dirty = unlanded(ctx, a)
             work = []
             if ahead:
                 work.append(f"{ahead} saved change(s) not landed yet")
+            if where != "ok":  # Praxis does not look inside a folder git does not see as this agent's
+                work.append("unknown what is in its folder" if where != "missing" else "its folder is gone")
             if dirty:
                 work.append(f"{len(dirty)} file(s) being edited")
             landed = store.row("SELECT 1 FROM landings WHERE agent = ? AND ok = 1 AND at >= ?", (a["name"], a["started"]))
@@ -99,8 +102,9 @@ def render(ctx: Ctx) -> str:
     out.append("LANDING LINE" if line else "LANDING LINE: empty")
     for n, q in enumerate(line, 1):
         if not ticket_alive(store, q["token"]):
-            out.append(f"  {n}. {q['agent']}: its landing stopped part-way (its process ended). The next landing "
-                       "clears this; nothing landed from it.")
+            out.append(f"  {n}. {q['agent']}: its landing stopped part-way (its process ended), so it may not have "
+                       f"finished. Whether its work landed shows under RECENT LANDINGS below and on the branch "
+                       f"{cfg.main_branch}. The next landing clears this line.")
         elif q["started"]:
             out.append(f"  {n}. {q['agent']} is landing now (started {ago(q['started'], now)})")
         else:
