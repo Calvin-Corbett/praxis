@@ -110,8 +110,10 @@ needs you.
 **4. The agents land their work.** When an agent finishes, it runs `praxis land <its name>` (the rules in
 AGENTS.md tell it to). Praxis tests the work and adds it to the main version only if the check passes.
 If two agents finish at once, the second simply waits its turn. A landing can take minutes; the rules tell
-agents to give it a long time limit and never stop it part-way. The check never gets a keyboard, so a build
-script that ends with `pause` simply carries on.
+agents to give it a long time limit and never stop it part-way. While a long check runs, Praxis says about once a
+minute that it is still running, with the check's last line of output and where its full output is, so nobody
+mistakes it for a hang. The check never gets a keyboard, so a build script that ends with `pause` simply carries
+on. Praxis keeps the newest 200 check logs, up to 1 GB together (the oldest go first).
 
 **5. Finish.** When a task is done and landed, the agent (or you) runs `praxis done <name>` from the main
 project folder (a folder cannot be removed while a terminal is in it; Praxis says so if you try). That frees

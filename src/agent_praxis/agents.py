@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import stat
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ ENGINE_CACHES = {
     "Godot": {".godot", ".import"},
 }
 CACHES_ANYWHERE = {"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+# Write a new folder's files with several workers at once (git's parallel checkout: the same files, faster).
+PARALLEL_CHECKOUT = ["-c", "checkout.workers=0"]
 
 
 @dataclass
@@ -55,14 +58,15 @@ def check_name(name: str) -> str:
     return low
 
 
-def folder_state(ctx: Ctx, row) -> str:
+def folder_state(ctx: Ctx, row, is_worktree: bool | None = None) -> str:
     """'ok' when the agent's folder is this project's working folder for it, 'missing' when it is gone (or only
     an empty folder is left), 'partial' when it is what is left of a removal Praxis itself started, 'foreign' when
-    something else is there. Git commands only ever run in 'ok'."""
+    something else is there. Git commands only ever run in 'ok'. *is_worktree* is a `gitops.is_worktree_of`
+    answer for the folder, when the caller already has one."""
     folder = Path(row["worktree"])
     if not folder.exists():
         return "missing"
-    if folder.is_dir() and gitops.is_worktree_of(folder, ctx.repo.common):
+    if folder.is_dir() and (gitops.is_worktree_of(folder, ctx.repo.common) if is_worktree is None else is_worktree):
         return "ok"
     try:
         if folder.is_dir() and not any(folder.iterdir()):
@@ -150,8 +154,9 @@ def refuse_other_agents_folder(ctx: Ctx, row, verb: str) -> None:
         )
 
 
-def _refuse_while_busy(ctx: Ctx, row, folder: Path | None, verb: str) -> None:
-    """Before removing an agent's folder: it must not be landing, and nothing may be using the folder."""
+def _refuse_while_busy(ctx: Ctx, row, folder: Path | None, verb: str) -> FolderScan | None:
+    """Before removing an agent's folder: it must not be landing, and nothing may be using the folder. Returns the
+    look through the folder it took (on Windows), for the link check to reuse."""
     from agent_praxis.landing_queue import landing_now  # here, so the landing line can import this module
     if landing_now(ctx.store, row["name"]):
         raise PraxisError(
@@ -159,7 +164,7 @@ def _refuse_while_busy(ctx: Ctx, row, folder: Path | None, verb: str) -> None:
             "Nothing was changed."
         )
     if folder is None:
-        return
+        return None
     try:
         Path.cwd().resolve().relative_to(folder.resolve())
         inside = True
@@ -171,19 +176,80 @@ def _refuse_while_busy(ctx: Ctx, row, folder: Path | None, verb: str) -> None:
             f"Nothing was changed. Run it from the main project folder:\n"
             f'  cd "{ctx.repo.root}"\n  praxis {verb} {row["name"]}'
         )
-    busy = _folder_in_use(folder)  # Windows cannot remove a folder another program is using: ask before touching
+    scan = scan_folder(folder) if os.name == "nt" else None  # one look serves this check and the link check
+    busy = _folder_in_use(folder, scan=scan)  # Windows cannot remove a folder another program is using: ask first
     if busy is not None:
         raise PraxisError(
             f"Another program is using {row['name']}'s folder ({busy}): a terminal or file window open in it, an "
             "editor, or the game engine. Windows cannot remove a folder while it is in use. Close it, then run "
             f"`praxis {verb} {row['name']}` again. Nothing was changed."
         )
+    return scan
 
 
-def _folder_in_use(folder: Path, limit: int = 200_000) -> str | None:
+IN_USE_LIMIT = 200_000  # a huge folder: stop asking after this many. A removal cut short is then "partial"
+
+
+@dataclass
+class FolderScan:
+    """One walk through an agent's folder, never into .git and never through a link (Windows only)."""
+    paths: list[str]      # every folder and file in walk order (folders before what is in them), up to the limit
+    junctions: list[str]  # junctions to folders, relative to the folder, as `refuse_links_git_walks_into` wants
+
+
+def _walk(top: str):
+    """Like os.walk(top, topdown=True, followlinks=False), but with each name's os.DirEntry, whose details Windows
+    hands over with the listing itself: asking whether an entry is a link then costs no extra call. Remove
+    entries from the folder list in place to keep the walk out of them."""
+    stack = [top]
+    while stack:
+        here = stack.pop()
+        try:
+            with os.scandir(here) as listing:
+                entries = list(listing)
+        except OSError:
+            continue  # os.walk skips a folder it cannot list
+        dirs, files = [], []
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            (dirs if is_dir else files).append(entry)
+        yield here, dirs, files
+        for entry in reversed(dirs):  # so the first folder is walked first, as os.walk does
+            if not entry.is_symlink():
+                stack.append(entry.path)
+
+
+def scan_folder(folder: Path, limit: int | None = None) -> FolderScan:
+    limit = IN_USE_LIMIT if limit is None else limit
+    paths_seen: list[str] = []
+    junctions: list[str] = []
+    for here, dirs, files in _walk(str(folder)):
+        keep = []
+        for entry in dirs:
+            if entry.name == ".git":
+                continue
+            if _entry_is_link(entry):  # never walk into it
+                if _entry_reparse_tag(entry) == _JUNCTION:
+                    junctions.append(Path(entry.path).relative_to(folder).as_posix())
+                continue
+            keep.append(entry)
+        dirs[:] = keep
+        if len(paths_seen) < limit:
+            # Folders (a terminal's current folder) and files (an editor or engine holding one open) alike.
+            paths_seen.append(here)
+            paths_seen.extend(entry.path for entry in files)
+            del paths_seen[limit:]
+    return FolderScan(paths=paths_seen, junctions=junctions)
+
+
+def _folder_in_use(folder: Path, limit: int | None = None, scan: FolderScan | None = None) -> str | None:
     """On Windows, the first folder or file inside *folder* that some program holds open (a terminal's current
     folder, a file open in an editor or the engine), or None. It only asks Windows for permission to delete each
-    one; nothing is moved or changed."""
+    one; nothing is moved or changed. The asking is spread over a few threads (each answer is a wait on Windows),
+    and the answer is still the first one in walk order."""
     if os.name != "nt":
         return None
     try:
@@ -198,22 +264,38 @@ def _folder_in_use(folder: Path, limit: int = 200_000) -> str | None:
         return None
     invalid = wintypes.HANDLE(-1).value
     delete, share_all, open_existing, backup_semantics, open_reparse = 0x00010000, 0x7, 3, 0x02000000, 0x00200000
-    checked = 0
-    for here, dirs, files in os.walk(str(folder), topdown=True, followlinks=False):
-        dirs[:] = [d for d in dirs if d != ".git" and not _is_link(os.path.join(here, d))]
-        # Folders (a terminal's current folder) and files (an editor or engine holding one open) alike.
-        for path in [here, *(os.path.join(here, f) for f in files)]:
-            handle = k32.CreateFileW(path, delete, share_all, None, open_existing, backup_semantics | open_reparse,
-                                     None)
+    limit = IN_USE_LIMIT if limit is None else limit
+    paths_all = (scan or scan_folder(folder, limit)).paths[:limit]
+    first = [len(paths_all)]  # the lowest busy position found so far
+    lock = threading.Lock()
+
+    def ask(start: int) -> None:
+        for i in range(start, min(start + _IN_USE_BLOCK, len(paths_all))):
+            if i > first[0]:
+                return  # an earlier one is already busy
+            handle = k32.CreateFileW(paths_all[i], delete, share_all, None, open_existing,
+                                     backup_semantics | open_reparse, None)
             if handle == invalid or handle is None:
                 if ctypes.get_last_error() == 32:  # ERROR_SHARING_VIOLATION: someone has it open
-                    return path
+                    with lock:
+                        first[0] = min(first[0], i)
+                    return
             else:
                 k32.CloseHandle(handle)
-            checked += 1
-            if checked >= limit:
-                return None  # a huge folder: stop looking. A removal cut short is then reported as "partial"
-    return None
+
+    starts = range(0, len(paths_all), _IN_USE_BLOCK)
+    if len(starts) <= 1:
+        for start in starts:
+            ask(start)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(_IN_USE_THREADS, len(starts))) as pool:
+            list(pool.map(ask, starts))  # blocks in order, so the earliest are asked first
+    return paths_all[first[0]] if first[0] < len(paths_all) else None
+
+
+_IN_USE_BLOCK = 256
+_IN_USE_THREADS = 8
 
 
 def need_agent(ctx: Ctx, name: str):
@@ -316,11 +398,12 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str]) -> Path:
     try:
         folder.parent.mkdir(parents=True, exist_ok=True)
         if gitops.branch_exists(ctx.repo.root, branch):
-            gitops.git(["worktree", "add", str(folder), branch], ctx.repo.root)
+            gitops.git([*PARALLEL_CHECKOUT, "worktree", "add", str(folder), branch], ctx.repo.root)
             ctx.say(f"Found earlier work on branch {branch}; {name} carries on from it.")
         else:
             made_branch = True
-            gitops.git(["worktree", "add", "-b", branch, str(folder), f"refs/heads/{main}"], ctx.repo.root)
+            gitops.git([*PARALLEL_CHECKOUT, "worktree", "add", "-b", branch, str(folder), f"refs/heads/{main}"],
+                       ctx.repo.root)
     except BaseException as exc:
         with ctx.store.write() as db:
             db.execute("DELETE FROM claims WHERE agent = ?", (name,))
@@ -418,13 +501,86 @@ def unlanded(ctx: Ctx, row) -> tuple[int, list[str]]:
     """(commits not yet on the main branch, files changed but not saved) for an agent. Commits count whether they
     are on the agent's branch or only in its folder (made on another branch, or with no branch at all)."""
     folder = Path(row["worktree"])
-    usable = folder_state(ctx, row) == "ok"  # never run git in a folder that is not this agent's: see folder_state
+    is_worktree, head = _probe(ctx, folder)
+    usable = folder_state(ctx, row, is_worktree) == "ok"  # never run git in a folder that is not this agent's
     dirty = gitops.dirty_files(folder) if usable else []
     tips = [gitops.rev(ctx.repo.root, f"refs/heads/{row['branch']}")]
     if usable:
-        tips.append(gitops.rev(folder, "HEAD"))
+        tips.append(head)
     ahead = gitops.commits_not_in(ctx.repo.root, tips, [f"refs/heads/{ctx.cfg.main_branch}"])
     return ahead, dirty
+
+
+def _probe(ctx: Ctx, folder: Path) -> tuple[bool | None, str | None]:
+    """(is_worktree_of answer, commit checked out there) in one git call; (None, None) when folder_state would not
+    ask git at all."""
+    if not folder.is_dir():
+        return None, None
+    return gitops.worktree_probe(folder, ctx.repo.common, want_head=True)
+
+
+@dataclass
+class Look:
+    """What `praxis status` shows about one agent's folder, read in one go."""
+    is_worktree: bool | None
+    ahead: int = 0
+    dirty: list = None
+    activity: float = 0.0
+    error: BaseException | None = None  # reading past the folder check failed
+
+
+AGENT_BRANCHES = "refs/heads/" + BRANCH_PREFIX
+LOOK_THREADS = 8
+
+
+def look_at_agents(ctx: Ctx, rows: list) -> dict[str, Look]:
+    """{agent: Look} for every agent, with as few git calls as possible: one for all branch tips, then per agent
+    one for its folder (is it this project's, and its commit), one `git status` and one count, in a few threads.
+    The answers are the ones folder_state, unlanded and last_activity give."""
+    if not rows:
+        return {}
+    tips = gitops.branch_tips(ctx.repo.root, [AGENT_BRANCHES])
+    main_ref = f"refs/heads/{ctx.cfg.main_branch}"
+
+    def read(row) -> Look:
+        folder = Path(row["worktree"])
+        try:
+            is_worktree, head = _probe(ctx, folder)
+        except Exception as exc:  # noqa: BLE001 - status shows the rest of the page anyway
+            return Look(is_worktree=None, error=exc)
+        look = Look(is_worktree=is_worktree, dirty=[])
+        try:
+            usable = folder.exists() and folder.is_dir() and bool(is_worktree)  # folder_state's "ok"
+            branch_ref = f"refs/heads/{row['branch']}"
+            if branch_ref.startswith(AGENT_BRANCHES):
+                tip, stamp = tips.get(branch_ref, (None, None))
+            else:
+                tip = gitops.rev(ctx.repo.root, branch_ref)
+                stamp = gitops.commit_time(ctx.repo.root, row["branch"]) if tip else None
+            look.dirty = gitops.dirty_files(folder) if usable else []
+            look.ahead = gitops.commits_not_in(ctx.repo.root, [tip, *([head] if usable else [])], [main_ref])
+            newest = float(row["last_seen"])
+            if tip and stamp:
+                # The branch's own unlanded count: the same number as above unless the folder is on another commit.
+                own = look.ahead if not usable or head == tip else gitops.commits_ahead(ctx.repo.root, main_ref,
+                                                                                         branch_ref)
+                if own:
+                    newest = max(newest, stamp)
+            for rel in look.dirty[:500]:
+                try:
+                    newest = max(newest, (folder / rel).stat().st_mtime)
+                except OSError:
+                    pass
+            look.activity = newest
+        except Exception as exc:  # noqa: BLE001
+            look.error = exc
+        return look
+
+    if len(rows) == 1:
+        return {rows[0]["name"]: read(rows[0])}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(LOOK_THREADS, len(rows))) as pool:
+        return {row["name"]: look for row, look in zip(rows, pool.map(read, rows))}
 
 
 def off_branch(row, folder: Path, say=None) -> str | None:
@@ -461,9 +617,11 @@ def _tree(folder: Path, commit: str) -> str | None:
     return proc.stdout.strip() or None
 
 
-def _remove_folder(ctx: Ctx, row) -> None:
+def _remove_folder(ctx: Ctx, row, links_checked: bool = False, subs: list[str] | None = None) -> None:
     """Remove an agent's folder whose work is all landed or saved. Never with untracked or changed files in it:
-    callers check that first, and ignored files are moved out (or are rebuildable caches) before this runs."""
+    callers check that first, and ignored files are moved out (or are rebuildable caches) before this runs.
+    *links_checked*: the caller ran refuse_links_git_walks_into on this folder just before, with nothing changed
+    since. *subs*: the folder's submodules, when the caller just asked and nothing changed since."""
     folder = Path(row["worktree"])
     state = folder_state(ctx, row)  # git only ever runs in a folder that is really this agent's
     if state == "foreign":
@@ -471,8 +629,9 @@ def _remove_folder(ctx: Ctx, row) -> None:
     if state == "partial":
         raise _partial(row)
     if state == "ok":
-        refuse_links_git_walks_into(row, folder)  # before anything is moved or deleted
-        subs = gitops.submodules(folder)
+        if not links_checked:
+            refuse_links_git_walks_into(row, folder)  # before anything is moved or deleted
+        subs = gitops.submodules(folder) if subs is None else subs
         stranded = [s for s in subs if gitops.commits_only_here(folder / s, ctx.repo.root / s)]
         if stranded:
             raise PraxisError(
@@ -589,23 +748,14 @@ _LINK_TAGS = {0xA000000C, 0xA0000003}  # Windows symbolic link, and mount point 
 _JUNCTION, _NAME_SURROGATE = 0xA0000003, 0x20000000
 
 
-def refuse_links_git_walks_into(row, folder: Path) -> None:
+def refuse_links_git_walks_into(row, folder: Path, scan: FolderScan | None = None) -> None:
     """On Windows, git treats a junction (what `mklink /J` and some tools make) as an ordinary folder: it would
     save the files it points to as part of the project, and removing the agent's folder would change or delete
     those real files. A junction git ignores is safe (Praxis moves it, as a link). Refuse before anything is
-    committed, moved or deleted."""
+    committed, moved or deleted. *scan* is a look through the folder taken just before, to reuse."""
     if os.name != "nt":
         return  # elsewhere git stores a link as a link and never steps through it
-    found = []
-    for here, dirs, _files in os.walk(str(folder), topdown=True, followlinks=False):
-        if ".git" in dirs:
-            dirs.remove(".git")
-        for name in list(dirs):
-            full = os.path.join(here, name)
-            if _is_link(full):
-                dirs.remove(name)  # never walk into it
-                if getattr(os.lstat(full), "st_reparse_tag", 0) == _JUNCTION:
-                    found.append(Path(full).relative_to(folder).as_posix())
+    found = (scan or scan_folder(folder)).junctions
     if not found:
         return
     ignored = set(gitops.git(["check-ignore", "-z", "--stdin"], folder, check=False,
@@ -630,10 +780,33 @@ def _is_link(path: str) -> bool:
         info = os.lstat(path)
     except OSError:
         return False
+    return _stat_is_link(info)
+
+
+def _stat_is_link(info) -> bool:
     if stat.S_ISLNK(info.st_mode):
         return True
     tag = getattr(info, "st_reparse_tag", 0)
     return tag in _LINK_TAGS or bool(tag & _NAME_SURROGATE)  # the surrogate bit marks other kinds of link too
+
+
+def _entry_is_link(entry: os.DirEntry) -> bool:
+    """_is_link for a walk's entry. On Windows the answer comes with the folder listing (no call per entry);
+    elsewhere a link is exactly a symbolic link, which the listing also says."""
+    if os.name != "nt":
+        return entry.is_symlink()
+    try:
+        info = entry.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return _stat_is_link(info)
+
+
+def _entry_reparse_tag(entry: os.DirEntry) -> int:
+    try:
+        return getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
+    except OSError:
+        return 0
 
 
 def _unlink(path: str) -> None:
@@ -653,15 +826,16 @@ def _unlink_links_inside(folder: Path) -> None:
     """Remove (as a link) every link in *folder* that git does not track, so deleting the folder can never reach
     files outside it. Links git tracks are left to git, which removes them as links. Removing an untracked link
     leaves git's own last check ("contains modified or untracked files") fully in force."""
-    tracked = set(gitops.git(["ls-files", "-z"], folder).stdout.split("\0"))
-    for here, dirs, files in os.walk(str(folder), topdown=True, followlinks=False):
-        if ".git" in dirs:
-            dirs.remove(".git")
-        for name in list(dirs) + files:
-            full = os.path.join(here, name)
-            if _is_link(full):
-                if name in dirs:
-                    dirs.remove(name)  # never walk into it
+    tracked = None  # what git tracks: asked only once a link is found
+    for _here, dirs, files in _walk(str(folder)):
+        dirs[:] = [entry for entry in dirs if entry.name != ".git"]
+        for entry in list(dirs) + files:
+            full = entry.path
+            if _entry_is_link(entry):
+                if entry in dirs:
+                    dirs.remove(entry)  # never walk into it
+                if tracked is None:
+                    tracked = set(gitops.git(["ls-files", "-z"], folder).stdout.split("\0"))
                 if Path(full).relative_to(folder).as_posix() in tracked:
                     continue
                 try:
@@ -683,16 +857,14 @@ def delete_without_following_links(path: Path) -> None:
             os.chmod(top, stat.S_IWRITE)
             os.unlink(top)
         return
-    for here, dirs, files in os.walk(top, topdown=True, followlinks=False):
-        for name in list(dirs):
-            full = os.path.join(here, name)
-            if _is_link(full):
-                _unlink(full)
-                dirs.remove(name)  # never walk into it
-        for name in files:
-            full = os.path.join(here, name)
-            if _is_link(full):
-                _unlink(full)
+    for _here, dirs, files in _walk(top):
+        for entry in list(dirs):
+            if _entry_is_link(entry):
+                _unlink(entry.path)
+                dirs.remove(entry)  # never walk into it
+        for entry in files:
+            if _entry_is_link(entry):
+                _unlink(entry.path)
     retry = {"onexc": _writable} if sys.version_info >= (3, 12) else {"onerror": _writable}
     shutil.rmtree(top, **retry)  # no links are left inside
 
@@ -709,7 +881,8 @@ def done(ctx: Ctx, name: str) -> None:
     row = need_agent(ctx, name)
     refuse_other_agents_folder(ctx, row, "done")
     folder = _usable_folder(ctx, row)
-    _refuse_while_busy(ctx, row, folder, "done")
+    scan = _refuse_while_busy(ctx, row, folder, "done")
+    subs = None
     if folder is not None:
         if gitops.operation_in_progress(folder):
             raise PraxisError(
@@ -720,8 +893,9 @@ def done(ctx: Ctx, name: str) -> None:
         problem = off_branch(row, folder, ctx.say)
         if problem:
             raise PraxisError(f"{problem}\nNothing was removed.")
-        refuse_links_git_walks_into(row, folder)  # first: git would count a junction's files as the agent's
-        _refuse_unsaved_submodules(row, folder)
+        refuse_links_git_walks_into(row, folder, scan)  # first: git would count a junction's files as the agent's
+        subs = gitops.submodules(folder)
+        _refuse_unsaved_submodules(row, folder, subs)
     ahead, dirty = unlanded(ctx, row)
     if ahead or dirty:
         parts = []
@@ -734,7 +908,8 @@ def done(ctx: Ctx, name: str) -> None:
             f"Nothing was removed. Land it first with `praxis land {row['name']}`, "
             f"or stop and keep a copy with `praxis abandon {row['name']}`."
         )
-    _remove_folder(ctx, row)
+    # Only reads happened since the link and submodule checks above, so their answers still hold.
+    _remove_folder(ctx, row, links_checked=folder is not None, subs=subs)
     gitops.git(["branch", "-D", row["branch"]], ctx.repo.root, check=False)
     gitops.git(["update-ref", "-d", f"{JOINING_PREFIX}{row['name']}"], ctx.repo.root, check=False)  # all landed
     _forget(ctx, row["name"])
@@ -746,13 +921,13 @@ def abandon(ctx: Ctx, name: str) -> str | None:
     row = need_agent(ctx, name)
     refuse_other_agents_folder(ctx, row, "abandon")
     folder = _usable_folder(ctx, row)  # never commit in a folder that is not really this agent's
-    _refuse_while_busy(ctx, row, folder, "abandon")
+    scan = _refuse_while_busy(ctx, row, folder, "abandon")
     root, main = ctx.repo.root, f"refs/heads/{ctx.cfg.main_branch}"
     stamp = time.strftime("%Y%m%d-%H%M%S")
     saved: list[str] = []
     if folder is not None:
         _refuse_unsaved_submodules(row, folder)  # before anything changes: those edits cannot be saved for you
-        refuse_links_git_walks_into(row, folder)  # before committing: git would save what a junction points to
+        refuse_links_git_walks_into(row, folder, scan)  # before committing: git would save what a junction points to
         gitops.abort_operation(folder)
         if gitops.dirty_files(folder):
             gitops.commit(folder, f"praxis: unfinished work by {row['name']}, saved when it was abandoned")
@@ -826,14 +1001,18 @@ def last_activity(ctx: Ctx, row) -> float:
     return newest
 
 
-def stale_agents(ctx: Ctx, now: float | None = None) -> list[tuple[object, float]]:
-    """(agent row, hours quiet) for agents that still hold claims but have shown no sign of work for too long."""
+def stale_agents(ctx: Ctx, now: float | None = None, activity: dict[str, float] | None = None
+                 ) -> list[tuple[object, float]]:
+    """(agent row, hours quiet) for agents that still hold claims but have shown no sign of work for too long.
+    *activity*: last_activity answers the caller already has, by agent."""
     now = now or time.time()
+    activity = activity or {}
     found = []
     for row in ctx.store.agents():
         if not ctx.store.claims(row["name"]):
             continue
-        quiet = (now - last_activity(ctx, row)) / 3600
+        newest = activity[row["name"]] if row["name"] in activity else last_activity(ctx, row)
+        quiet = (now - newest) / 3600
         if quiet >= ctx.cfg.stale_after_hours:
             found.append((row, quiet))
     return found

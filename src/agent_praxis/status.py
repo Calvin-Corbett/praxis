@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from agent_praxis.agents import Ctx, agent_here, folder_state, last_activity, stale_agents, unlanded
+from agent_praxis.agents import Ctx, agent_here, folder_state, look_at_agents, stale_agents
 from agent_praxis.landing_queue import ticket_alive
 
 
@@ -34,8 +34,9 @@ def render(ctx: Ctx) -> str:
         out.append(f"You are in {here}'s folder. The main project folder is {ctx.repo.root}")
     out.append("")
 
+    looks = look_at_agents(ctx, agents)  # every agent's folder read once, in a few threads
     paused = [a for a in agents if a["paused"]]
-    stale = stale_agents(ctx, now)
+    stale = stale_agents(ctx, now, {n: look.activity for n, look in looks.items() if look.error is None})
     if paused or stale:
         out.append("NEEDS YOU")
         for a in paused:
@@ -66,7 +67,8 @@ def render(ctx: Ctx) -> str:
         if a["released"]:
             out.append(f"      note: {a['released']}")
         try:
-            where = folder_state(ctx, a)
+            look = looks[a["name"]]
+            where = folder_state(ctx, a, look.is_worktree)
             if where == "missing":
                 out.append(f"      PROBLEM: its folder is gone. To keep what it saved: praxis abandon {a['name']}")
             elif where == "partial":
@@ -76,7 +78,9 @@ def render(ctx: Ctx) -> str:
             elif where == "foreign":
                 out.append("      PROBLEM: its folder is no longer a git folder of this project. Move it somewhere "
                            f"safe (it may still hold unsaved work), then: praxis abandon {a['name']}")
-            ahead, dirty = unlanded(ctx, a)
+            if look.error is not None:
+                raise look.error
+            ahead, dirty = look.ahead, look.dirty
             work = []
             if ahead:
                 work.append(f"{ahead} saved change(s) not landed yet")
@@ -87,7 +91,7 @@ def render(ctx: Ctx) -> str:
             landed = store.row("SELECT 1 FROM landings WHERE agent = ? AND ok = 1 AND at >= ?", (a["name"], a["started"]))
             idle = "nothing new since its last landing" if landed else "no changes yet"
             out.append("      work: " + ("; ".join(work) if work else idle))
-            out.append(f"      last sign of work: {ago(last_activity(ctx, a), now)}")
+            out.append(f"      last sign of work: {ago(look.activity, now)}")
         except Exception:  # noqa: BLE001 - a damaged folder must not hide the rest of the page
             out.append("      work: (could not read its folder)")
     out.append("")

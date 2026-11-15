@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 import re
 from dataclasses import dataclass, field
@@ -219,6 +218,8 @@ def load(root: Path) -> Config:
     data = parse_toml(_read_text(path))
     unknown = sorted(set(data) - set(_KINDS))
     if unknown:  # a misspelled `chek = ...` must not mean "land without a check"
+        import difflib  # only here: it is slow to import, and only this message needs it
+
         hints = []
         for name in unknown:
             close = difflib.get_close_matches(name, list(_KINDS), n=1)

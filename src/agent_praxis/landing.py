@@ -24,6 +24,7 @@ from pathlib import Path
 from agent_praxis import enough, gitops, paths
 from agent_praxis.agents import (
     JOINING_PREFIX,
+    PARALLEL_CHECKOUT,
     Ctx,
     _foreign,
     _partial,
@@ -42,6 +43,8 @@ from agent_praxis.landing_queue import Ticket, landing_now
 TAIL_LINES = 40
 TAIL_BYTES = 256 * 1024  # how much of the end of a check's output is read back (the rest stays in the log)
 KEEP_LOGS = 200
+KEEP_LOG_BYTES = 1024 ** 3  # the check logs together stay under this (oldest go first), apart from the newest one
+HEARTBEAT_SECONDS = 60  # while a check runs, say it is still running this often, so nobody thinks it hung
 RETRIES_WHEN_MAIN_MOVES = 3
 
 
@@ -132,8 +135,12 @@ def _refuse_pointer_commits(ctx: Ctx, row, folder: Path) -> None:
     """A pointer to another git project's commit (made by `git add` on a folder that has its own .git) that is
     not a listed submodule: landing it would put an empty, broken folder into the main version."""
     main_ref = f"refs/heads/{ctx.cfg.main_branch}"
-    known = set(gitops.gitlinks(ctx.repo.root, main_ref)) | gitops.listed_submodules(folder, "HEAD")
-    loose = [p for p in gitops.gitlinks(folder, "HEAD") if p not in known]
+    # The pointers in HEAD that main does not also have (a pointer main has already landed is known), less the
+    # ones .gitmodules lists. Comparing the two versions finds them without listing every file of both.
+    loose = gitops.new_gitlinks(folder, main_ref, "HEAD")
+    if loose:
+        listed = gitops.listed_submodules(folder, "HEAD")
+        loose = [p for p in loose if p not in listed]
     if loose:
         raise PraxisError(
             f"{row['name']}'s saved work stores these folders as bare pointers to other git projects: "
@@ -430,7 +437,7 @@ def _run_check(ctx: Ctx, row, folder: Path) -> tuple[bool, str, str]:
                                 stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
         try:
             guard.watch(proc)
-            proc.wait()
+            _wait_saying_so(ctx, proc, log)
         except BaseException:  # stopped (Ctrl+C): stop the check and what it started, then report it
             guard.stop()
             proc.kill()
@@ -446,17 +453,70 @@ def _run_check(ctx: Ctx, row, folder: Path) -> tuple[bool, str, str]:
         if size > TAIL_BYTES:  # started part-way through: drop the cut-off first line
             data = data[data.find(b"\n") + 1:]
         output = _decode(data)
-    _prune_logs(logs)
+    _prune_logs(logs, keep=log)
     return proc.returncode == 0, output, str(log)
 
 
-def _prune_logs(logs: Path) -> None:
-    found = sorted(logs.glob("*.log"), key=lambda p: p.stat().st_mtime)
-    for old in found[:-KEEP_LOGS]:
+def _wait_saying_so(ctx: Ctx, proc: subprocess.Popen, log: Path) -> None:
+    """Wait for the check (as long as it takes), saying about once a minute that it is still running, with the
+    last line it printed: a long, silent check otherwise looks hung to a person or an AI tool."""
+    began = time.monotonic()
+    while True:
+        try:
+            proc.wait(timeout=HEARTBEAT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        minutes = int((time.monotonic() - began) // 60)
+        ctx.say(f"Check still running ({minutes} min). Output so far: {log}")
+        last = _last_line(log)
+        if last:
+            ctx.say(f"  Its last line: {last}")
+
+
+def _last_line(log: Path, limit: int = 200) -> str:
+    """The last non-empty line in the log so far (cut to *limit* characters), or ""."""
+    try:
+        with open(log, "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - 8192))
+            data = handle.read()
+    except OSError:
+        return ""
+    for line in reversed(data.replace(b"\r", b"\n").split(b"\n")):  # a progress bar redraws its line with \r
+        text = _decode(line).strip()
+        if text:
+            return text if len(text) <= limit else text[:limit] + "..."
+    return ""
+
+
+def _prune_logs(logs: Path, keep: Path | None = None) -> None:
+    """Keep the newest KEEP_LOGS check logs, and keep them all together under KEEP_LOG_BYTES, oldest first to go.
+    *keep* (the log of the landing just run) is never deleted, even when it alone is bigger."""
+    found = []
+    for path in logs.glob("*.log"):
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if keep is None or path.name != keep.name:  # the same folder: the name says which one it is
+            found.append((info.st_mtime, info.st_size, path))
+    found.sort(key=lambda item: item[0])
+    total = sum(size for _m, size, _p in found)
+    try:
+        total += keep.stat().st_size if keep is not None else 0
+    except OSError:
+        pass
+    extra = len(found) + (1 if keep is not None else 0) - KEEP_LOGS
+    for _mtime, size, old in found:
+        if extra <= 0 and total <= KEEP_LOG_BYTES:
+            break
         try:
             old.unlink()
         except OSError:
-            pass
+            continue
+        extra -= 1
+        total -= size
 
 
 def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | None:
@@ -465,7 +525,8 @@ def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | No
     if gitops.rev(folder, "HEAD") != checked:
         return ("A new commit was made in the folder while the check ran, so the check did not test what would "
                 "land. Nothing landed. Land again (and do not change the folder while a landing runs).")
-    tracked = gitops.dirty_files(folder, untracked=False)
+    entries = gitops.status_entries(folder)  # one look: tracked changes, and new files the check made
+    tracked = [path for state, path in entries if state != "??"]
     if tracked:
         return ("These files changed while the check ran, so the check may not have tested what would land:\n"
                 + "\n".join(f"  - {p}" for p in tracked[:20])
@@ -473,7 +534,7 @@ def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | No
                 "while a landing runs).\nIf the check itself rewrites them every time it runs, add them to "
                 'check_may_change in praxis.toml (for example check_may_change = ["' + tracked[0] + '"]), then land '
                 "again.")
-    new = gitops.dirty_files(folder)
+    new = [path for _state, path in entries]
     if new:
         ctx.say("Note: the check created new files that git does not ignore. They were not landed: "
                 + ", ".join(new[:8]) + (f" and {len(new) - 8} more" if len(new) > 8 else ""))
@@ -508,16 +569,17 @@ def _advance(ctx: Ctx, row, base: str, target: str):
     if not gitops.is_ancestor(root, base, target):
         return (f"The work is not built on top of the newest {main}, so moving {main} to it would drop commits "
                 f"that already landed. Praxis did not move {main}. Land again.")
-    rebasing = gitops.branch_being_rebased(root, main)
+    entries = gitops.worktrees_at(root)  # one list of the folders for both questions below
+    rebasing = gitops.branch_being_rebased(root, main, entries)
     if rebasing is not None:
         return (f"{main} is in the middle of a git rebase in {rebasing}. Moving it now would break that rebase. "
                 "This needs the human: finish it (`git rebase --continue`) or cancel it (`git rebase --abort`), "
                 "then land again.")
-    where = gitops.branch_checked_out_at(root, main)
+    where = gitops.branch_checked_out_at(root, main, entries)
     if where is None:
         gitops.git(["update-ref", f"refs/heads/{main}", target, base], root)
         return True
-    proc = gitops.git(["merge", "--ff-only", "-q", target], where, check=False)
+    proc = gitops.git([*PARALLEL_CHECKOUT, "merge", "--ff-only", "-q", target], where, check=False)
     if proc.returncode == 0:
         return True
     said = (proc.stderr or proc.stdout).strip()

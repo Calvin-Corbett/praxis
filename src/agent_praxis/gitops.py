@@ -102,8 +102,8 @@ def worktrees_at(cwd: Path | str) -> list[dict]:
     return entries
 
 
-def branch_checked_out_at(cwd: Path | str, branch: str) -> Path | None:
-    for entry in worktrees_at(cwd):
+def branch_checked_out_at(cwd: Path | str, branch: str, entries: list[dict] | None = None) -> Path | None:
+    for entry in worktrees_at(cwd) if entries is None else entries:
         if entry.get("branch") == f"refs/heads/{branch}":
             return Path(entry["worktree"])
     return None
@@ -123,32 +123,54 @@ def current_branch(cwd: Path | str) -> str | None:
     return proc.stdout.strip() or None
 
 
-def dirty_files(cwd: Path | str, untracked: bool = True) -> list[str]:
-    """Changed, new or deleted files that are not committed yet (ignored files do not count).
-    With untracked=False, only files git already tracks."""
+# `git status` only reads. Without this it may also refresh the folder's index, taking its lock: `praxis status`
+# reading another agent's folder must never make that agent's own git command fail on a locked index.
+READ_ONLY = "--no-optional-locks"
+
+
+def status_entries(cwd: Path | str, untracked: bool = True) -> list[tuple[str, str]]:
+    """(two-letter state, path) for every file that is not committed yet (ignored files do not count); the state
+    is "??" for a file git does not track. With untracked=False, only files git already tracks."""
     mode = "--untracked-files=all" if untracked else "--untracked-files=no"
-    raw = git(["status", "--porcelain=v1", "-z", mode], cwd).stdout
+    raw = git([READ_ONLY, "status", "--porcelain=v1", "-z", mode], cwd).stdout
     parts = raw.split("\0")
-    files: list[str] = []
+    found: list[tuple[str, str]] = []
     i = 0
     while i < len(parts):
         item = parts[i]
         i += 1
         if len(item) < 4:
             continue
-        files.append(item[3:])
+        found.append((item[:2], item[3:]))
         if item[0] in "RC":  # a rename carries its old name next
             i += 1
-    return files
+    return found
+
+
+def dirty_files(cwd: Path | str, untracked: bool = True) -> list[str]:
+    """Changed, new or deleted files that are not committed yet (ignored files do not count).
+    With untracked=False, only files git already tracks."""
+    return [path for _state, path in status_entries(cwd, untracked)]
+
+
+_IDENTITY: dict[str, list[str]] = {}  # per folder, for one praxis command (cli.run empties it)
 
 
 def identity_args(cwd: Path | str) -> list[str]:
-    args: list[str] = []
-    if not git(["config", "user.name"], cwd, check=False).stdout.strip():
-        args += ["-c", "user.name=Praxis"]
-    if not git(["config", "user.email"], cwd, check=False).stdout.strip():
-        args += ["-c", "user.email=praxis@localhost"]
-    return args
+    key = str(cwd)
+    if key not in _IDENTITY:
+        args: list[str] = []
+        if not git(["config", "user.name"], cwd, check=False).stdout.strip():
+            args += ["-c", "user.name=Praxis"]
+        if not git(["config", "user.email"], cwd, check=False).stdout.strip():
+            args += ["-c", "user.email=praxis@localhost"]
+        _IDENTITY[key] = args
+    return list(_IDENTITY[key])
+
+
+def forget_cached_answers() -> None:
+    """Called at the start of every praxis command, so nothing remembered outlives the command."""
+    _IDENTITY.clear()
 
 
 def commit(cwd: Path | str, message: str, paths: list[str] | None = None) -> bool:
@@ -184,7 +206,7 @@ def is_ancestor(cwd: Path | str, older: str, newer: str) -> bool:
 
 def ignored_entries(cwd: Path | str) -> list[str]:
     """Ignored files and folders (a wholly ignored folder is one entry ending in '/')."""
-    raw = git(["status", "--porcelain=v1", "-z", "--ignored"], cwd).stdout
+    raw = git([READ_ONLY, "status", "--porcelain=v1", "-z", "--ignored"], cwd).stdout
     return [item[3:] for item in raw.split("\0") if item.startswith("!! ")]
 
 
@@ -198,6 +220,20 @@ def submodules(cwd: Path | str) -> list[str]:
     for path in gitlinks(cwd):
         if path not in found and (Path(cwd) / path / ".git").exists():
             found.append(path)
+    return found
+
+
+def new_gitlinks(cwd: Path | str, older: str, newer: str) -> list[str]:
+    """Paths that are pointers to another git project's commit (submodules) in *newer* but not in *older* (added,
+    or something else there before): exactly the pointers of *newer* that *older* does not also have."""
+    raw = git(["diff-tree", "-r", "-z", "--raw", "--no-renames", "--ignore-submodules=none", older, newer],
+              cwd).stdout
+    parts = raw.split("\0")
+    found = []
+    for i in range(0, len(parts) - 1, 2):  # ":<old mode> <new mode> <old id> <new id> <state>", then the path
+        modes = parts[i].lstrip(":").split(" ")
+        if len(modes) >= 2 and modes[1] == "160000" and modes[0] != "160000":
+            found.append(parts[i + 1])
     return found
 
 
@@ -222,7 +258,8 @@ def listed_submodules(cwd: Path | str, ref: str = "HEAD") -> set[str]:
 def embedded_projects(cwd: Path | str) -> list[str]:
     """New folders in *cwd* that are git projects of their own (they hold a .git). `git add` would store each
     as a bare pointer to commits that exist only in that folder."""
-    raw = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd).stdout  # stops at a nested .git
+    # stops at a nested .git
+    raw = git([READ_ONLY, "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd).stdout
     found = []
     for item in raw.split("\0"):
         if item.startswith("?? ") and item.endswith("/") and (Path(cwd) / item[3:] / ".git").exists():
@@ -249,16 +286,64 @@ def is_worktree_of(folder: Path, common: Path) -> bool:
     """True only when *folder* is itself the top of a git working folder whose shared git folder is *common*.
     Git searches parent folders for a project, so a folder that lost its own .git would otherwise make git
     act on whatever project happens to contain it."""
+    return worktree_probe(folder, common)[0]
+
+
+def worktree_probe(folder: Path, common: Path, want_head: bool = False) -> tuple[bool, str | None]:
+    """(is_worktree_of(folder, common), and with *want_head* the commit checked out there or None), in one git
+    call whenever the folder has a commit."""
     if not (folder / ".git").exists():
-        return False
-    top = git(["rev-parse", "--show-toplevel"], folder, check=False)
-    shared = git(["rev-parse", "--git-common-dir"], folder, check=False)
-    if top.returncode != 0 or shared.returncode != 0:
-        return False
-    shared_path = Path(shared.stdout.strip())
+        return False, None
+    args = ["rev-parse", "--show-toplevel", "--git-common-dir"]
+    proc = git([*args, "--verify", "--quiet", "HEAD^{commit}"] if want_head else args, folder, check=False)
+    lines = proc.stdout.splitlines()
+    if proc.returncode == 0 and len(lines) == (3 if want_head else 2):
+        ok = _is_that_worktree(folder, common, lines)
+        return ok, (lines[2].strip() or None) if ok and want_head else None
+    if not want_head:
+        return False, None
+    # Most likely a folder with no commit yet: ask the two questions on their own, exactly as without HEAD.
+    proc = git(args, folder, check=False)
+    lines = proc.stdout.splitlines()
+    if proc.returncode != 0 or len(lines) != 2:
+        return False, None
+    ok = _is_that_worktree(folder, common, lines)
+    return ok, (rev(folder, "HEAD") if ok else None)
+
+
+def _is_that_worktree(folder: Path, common: Path, lines: list[str]) -> bool:
+    shared_path = Path(lines[1].strip())
     if not shared_path.is_absolute():
         shared_path = folder / shared_path
-    return same_path(top.stdout.strip(), folder) and same_path(shared_path, common)
+    return same_path(lines[0].strip(), folder) and same_path(shared_path, common)
+
+
+def git_paths(cwd: Path | str, names: list[str]) -> list[Path]:
+    """Where git keeps each of *names* (rebase-merge, MERGE_HEAD...) for this folder: one git call for all."""
+    args = ["rev-parse"]
+    for name in names:
+        args += ["--git-path", name]
+    lines = out(args, cwd).splitlines()
+    if len(lines) != len(names):
+        raise PraxisError(f"git rev-parse gave {len(lines)} answer(s) for {len(names)} question(s) in {cwd}.")
+    found = []
+    for line in lines:
+        path = Path(line.strip())
+        found.append(path if path.is_absolute() else Path(cwd) / path)
+    return found
+
+
+def branch_tips(cwd: Path | str, patterns: list[str]) -> dict[str, tuple[str, float | None]]:
+    """{full ref name: (commit, commit time)} for every ref matching *patterns* (e.g. "refs/heads/praxis/"), in
+    one git call."""
+    raw = git(["for-each-ref", "--format=%(refname)%00%(objectname)%00%(committerdate:unix)", *patterns],
+              cwd).stdout
+    tips: dict[str, tuple[str, float | None]] = {}
+    for line in raw.splitlines():
+        parts = line.split("\0")
+        if len(parts) == 3:
+            tips[parts[0]] = (parts[1], float(parts[2]) if parts[2].isdigit() else None)
+    return tips
 
 
 def commits_only_here(submodule: Path, elsewhere: Path | None = None) -> bool:
@@ -279,15 +364,20 @@ def is_ignored(cwd: Path | str, path: str) -> bool:
     return git(["check-ignore", "-q", "--", path], cwd, check=False).returncode == 0
 
 
-def branch_being_rebased(cwd: Path | str, branch: str) -> Path | None:
-    """The folder where *branch* is in the middle of a rebase (git then shows that folder as 'detached')."""
-    for entry in worktrees_at(cwd):
+def branch_being_rebased(cwd: Path | str, branch: str, entries: list[dict] | None = None) -> Path | None:
+    """The folder where *branch* is in the middle of a rebase (git then shows that folder as 'detached').
+    *entries* is a `worktrees_at` answer to reuse."""
+    names = ("rebase-merge/head-name", "rebase-apply/head-name")
+    args = ["rev-parse", *(arg for name in names for arg in ("--git-path", name))]
+    for entry in worktrees_at(cwd) if entries is None else entries:
         folder = Path(entry["worktree"])
         if not folder.is_dir():
             continue
-        for name in ("rebase-merge/head-name", "rebase-apply/head-name"):
-            proc = git(["rev-parse", "--git-path", name], folder, check=False)
-            path = Path(proc.stdout.strip())
+        lines = git(args, folder, check=False).stdout.splitlines()
+        if len(lines) != len(names):  # not one answer for each: ask one at a time
+            lines = [git(["rev-parse", "--git-path", name], folder, check=False).stdout for name in names]
+        for line in lines:
+            path = Path(line.strip())
             if not path.is_absolute():
                 path = folder / path
             try:
@@ -316,10 +406,8 @@ def commit_time(cwd: Path | str, ref: str) -> float | None:
 
 def operation_in_progress(cwd: Path | str) -> str | None:
     """'rebase' or 'merge' when one was left half-done in this folder."""
-    for name, kind in (("rebase-merge", "rebase"), ("rebase-apply", "rebase"), ("MERGE_HEAD", "merge")):
-        path = Path(out(["rev-parse", "--git-path", name], cwd))
-        if not path.is_absolute():
-            path = Path(cwd) / path
+    kinds = (("rebase-merge", "rebase"), ("rebase-apply", "rebase"), ("MERGE_HEAD", "merge"))
+    for path, (_name, kind) in zip(git_paths(cwd, [name for name, _ in kinds]), kinds):
         if path.exists():
             return kind
     return None

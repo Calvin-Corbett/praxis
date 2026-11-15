@@ -7,7 +7,7 @@ import os
 import sys
 import traceback
 
-from agent_praxis import __version__, agents, config, gitops, landing, setup, status
+from agent_praxis import __version__, agents, config, gitops
 from agent_praxis.agents import Ctx
 from agent_praxis.errors import PraxisError
 from agent_praxis.store import Store
@@ -87,7 +87,10 @@ def run(argv: list[str]) -> int:
     if not args.command:
         print(HELP)
         return 0
+    gitops.forget_cached_answers()  # nothing a git call answered outlives one command
+    # Each command imports only what it needs, so a quick one (status, claim) starts quickly.
     if args.command == "init":
+        from agent_praxis import setup
         setup.init(check=args.check, commit=not args.no_commit, say=_say)
         return 0
     ctx, store = _ctx()
@@ -100,8 +103,10 @@ def run(argv: list[str]) -> int:
         elif cmd == "unclaim":
             agents.unclaim(ctx, args.agent, args.files)
         elif cmd == "land":
+            from agent_praxis import landing
             return 0 if landing.land(ctx, args.agent, finish=args.done) else 2
         elif cmd == "status":
+            from agent_praxis import status
             sys.stdout.write(status.render(ctx))
         elif cmd == "done":
             agents.done(ctx, args.agent)

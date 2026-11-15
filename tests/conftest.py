@@ -39,7 +39,35 @@ def praxis(*args: str) -> tuple[int, str]:
     return code, buf.getvalue()
 
 
+_TEMP_AREA: list[Path] = []  # pytest's temp area for this run, set by the fixture below
+
+
+def refuse_outside_temp_area(where: Path | str, args) -> None:
+    """The tests drive the real praxis command. A slip of the current folder once ran `praxis land` against the
+    real Praxis project: no praxis command from a test may run anywhere but inside pytest's temp area."""
+    try:
+        Path(where).resolve().relative_to(_TEMP_AREA[0])
+    except (ValueError, IndexError, OSError):
+        pytest.fail(f"refused to run `praxis {' '.join(args)}` in {where}: that is outside pytest's temp area "
+                    f"({_TEMP_AREA[0] if _TEMP_AREA else 'not known yet'}). Tests run praxis only in their own "
+                    "temporary projects.", pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _praxis_only_inside_the_temp_area(tmp_path_factory, monkeypatch):
+    from agent_praxis import cli
+    _TEMP_AREA[:] = [tmp_path_factory.getbasetemp().resolve()]
+    real_run = cli.run
+
+    def guarded_run(argv):
+        refuse_outside_temp_area(Path.cwd(), argv)
+        return real_run(argv)
+
+    monkeypatch.setattr(cli, "run", guarded_run)  # main() calls run(): every in-process command passes here
+
+
 def praxis_process(root: Path, *args: str, **kw) -> subprocess.Popen:
+    refuse_outside_temp_area(root, args)
     env = dict(os.environ, PYTHONPATH=str(SRC))
     return subprocess.Popen([sys.executable, "-m", "agent_praxis", *args], cwd=str(root), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw)
