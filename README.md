@@ -32,8 +32,8 @@ The easiest way is `pipx`, which installs command-line tools in their own little
 pipx install git+https://github.com/Calvin-Corbett/praxis.git
 ```
 
-(Replace the address with wherever the Praxis code lives. If you have the folder on your computer, you can
-install from it directly: `pipx install C:\path\to\praxis` or `pip install C:\path\to\praxis`.)
+(If you have the Praxis folder on your computer, you can install from it directly instead:
+`pipx install C:\path\to\praxis` or `pip install C:\path\to\praxis`.)
 
 No pipx? Plain pip works too:
 
