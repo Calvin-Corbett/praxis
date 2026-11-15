@@ -12,6 +12,12 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from agent_praxis.errors import PraxisError
+
+# The database's format number (kept in SQLite's user_version). Raise it whenever the tables change, and add the
+# step that brings an older database up to it to UPGRADES. A database from before format numbers reads as 0.
+FORMAT = 2
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
     name TEXT PRIMARY KEY,
@@ -59,6 +65,29 @@ CREATE TABLE IF NOT EXISTS removing (
 );
 """
 
+# Each step, by the format it brings a database up to. Every step must be safe on a database that already has it.
+UPGRADES = {
+    2: """
+CREATE TABLE IF NOT EXISTS branches (
+    branch TEXT PRIMARY KEY,
+    agent TEXT NOT NULL,
+    since REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS background (
+    agent TEXT PRIMARY KEY,
+    log TEXT NOT NULL,
+    pid INTEGER,
+    started REAL NOT NULL,
+    ended REAL,
+    exit_code INTEGER
+);
+""",
+}
+
+
+def _statements(script: str) -> list[str]:
+    return [part.strip() for part in script.split(";") if part.strip()]
+
 
 class Store:
     def __init__(self, state_dir: Path):
@@ -66,7 +95,34 @@ class Store:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.dir / "praxis.db"), timeout=60, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        self._retry(lambda: self.conn.executescript(SCHEMA))
+        self._refuse_newer(self._format())
+        if self._format() < FORMAT:
+            self._upgrade()
+
+    def _format(self) -> int:
+        return int(self._retry(lambda: self.conn.execute("PRAGMA user_version").fetchone()[0]))
+
+    @staticmethod
+    def _refuse_newer(found: int) -> None:
+        if found > FORMAT:
+            raise PraxisError(
+                f"This project was used by a newer Praxis (format {found}); this Praxis knows format {FORMAT} and "
+                "older. Update Praxis (or use the newer one) for this project. Nothing was changed."
+            )
+
+    def _upgrade(self) -> None:
+        """Bring a new or older database up to FORMAT, all in one transaction: another process upgrading at the same
+        moment waits, then finds nothing left to do."""
+        with self.write() as db:
+            found = int(db.execute("PRAGMA user_version").fetchone()[0])
+            self._refuse_newer(found)
+            if found >= FORMAT:
+                return
+            steps = [SCHEMA] + [UPGRADES[n] for n in range(max(found, 1) + 1, FORMAT + 1)]
+            for script in steps:
+                for statement in _statements(script):
+                    db.execute(statement)
+            db.execute(f"PRAGMA user_version = {FORMAT}")
 
     def close(self) -> None:
         self.conn.close()

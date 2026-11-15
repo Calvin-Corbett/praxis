@@ -23,6 +23,7 @@ def git(args: list[str], cwd: Path | str, check: bool = True, stdin: str | None 
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     env["GIT_EDITOR"] = "true"  # never open an editor and wait for a person
     env["LC_ALL"] = env.get("LC_ALL", "C")
+    env.update(agent_env(cwd))
     try:
         proc = subprocess.run(
             ["git", *args], check=False, cwd=str(cwd), capture_output=True, text=True,
@@ -168,9 +169,42 @@ def identity_args(cwd: Path | str) -> list[str]:
     return list(_IDENTITY[key])
 
 
+def sign_args(cwd: Path | str) -> list[str]:
+    """["-S"] when the project signs its commits (commit.gpgsign), for git commands that do not read that setting
+    themselves (commit-tree). git picks the key and the program (user.signingkey, gpg.format) as it always does."""
+    proc = git(["config", "--type=bool", "--get", "commit.gpgsign"], cwd, check=False)
+    return ["-S"] if proc.stdout.strip() == "true" else []
+
+
 def forget_cached_answers() -> None:
     """Called at the start of every praxis command, so nothing remembered outlives the command."""
     _IDENTITY.clear()
+    _AGENT_FOLDERS.clear()
+
+
+# Agent folders known to this command, with the variables every git command run inside one gets, so a project's
+# git hooks can tell an agent's commit (and which agent) apart from a person's.
+_AGENT_FOLDERS: dict[str, dict[str, str]] = {}
+
+
+def _folder_key(path: Path | str) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def agent_folder(folder: Path | str, agent: str, task: str) -> None:
+    """From now on (in this command), git commands run in *folder* or below it get PRAXIS_AGENT and PRAXIS_TASK."""
+    _AGENT_FOLDERS[_folder_key(folder)] = {"PRAXIS_AGENT": agent, "PRAXIS_TASK": task}
+
+
+def agent_env(cwd: Path | str) -> dict[str, str]:
+    """PRAXIS_AGENT and PRAXIS_TASK when *cwd* is in an agent's folder, else {}."""
+    if not _AGENT_FOLDERS:
+        return {}
+    here = _folder_key(cwd)
+    for top, extra in _AGENT_FOLDERS.items():
+        if here == top or here.startswith(top.rstrip(os.sep) + os.sep):
+            return extra
+    return {}
 
 
 def commit(cwd: Path | str, message: str, paths: list[str] | None = None) -> bool:

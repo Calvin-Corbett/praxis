@@ -21,7 +21,6 @@ from agent_praxis.store import Store
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 _RESERVED = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$")
-BRANCH_PREFIX = "praxis/"
 ARCHIVE_PREFIX = "praxis-saved/"
 # While a landing tries an agent's commits joined into one, its original commits are kept under this name.
 JOINING_PREFIX = "refs/praxis/joining/"
@@ -353,7 +352,22 @@ def _insert_claims(db, cfg: Config, agent: str, wanted: list[str]) -> list[str]:
     return added
 
 
-def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str]) -> Path:
+def _refuse_unknown_branch(ctx: Ctx, name: str, task: str, branch: str, wanted_raw: list[str]) -> None:
+    """A branch with the agent's name that Praxis did not make for it may be someone else's work: never take it
+    over silently."""
+    made_for = ctx.store.row("SELECT agent FROM branches WHERE branch = ?", (branch,))
+    if made_for is not None and made_for["agent"] == name:
+        return
+    files = "".join(f" {p}" for p in wanted_raw)
+    raise PraxisError(
+        f"A branch named {branch} already exists, and Praxis did not make it for {name}. Praxis will not take over "
+        "a branch it did not make, in case it holds someone else's work. Nothing was changed.\n"
+        f"Either pick another name for the agent, or, to carry on from that branch on purpose:\n"
+        f"  praxis start {name} \"{task.strip()}\"{files} --reuse-branch"
+    )
+
+
+def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str], reuse_branch: bool = False) -> Path:
     name = check_name(name)
     if not task.strip():
         raise PraxisError("Say what the agent will do, for example: praxis start claude-1 \"make the jump higher\"")
@@ -377,7 +391,9 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str]) -> Path:
         )
     wanted = _dedupe([paths.normalize(p, _roots(ctx)) for p in wanted_raw])
     folder = ctx.cfg.worktree_dir(ctx.repo.root) / name
-    branch = BRANCH_PREFIX + name
+    branch = ctx.cfg.branch_prefix + name
+    if gitops.branch_exists(ctx.repo.root, branch) and not reuse_branch:
+        _refuse_unknown_branch(ctx, name, task, branch, wanted_raw)
     if folder.parent.exists() and not folder.parent.is_dir():
         raise PraxisError(f"Praxis makes agent folders in {folder.parent}, but a file has that name. Move or rename "
                           "that file (or set worktree_root in praxis.toml), then start again.")
@@ -391,10 +407,12 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str]) -> Path:
                 raise _refuse(name, lines)
             db.execute("INSERT INTO agents (name, task, branch, worktree, started, last_seen) "
                        "VALUES (?, ?, ?, ?, ?, ?)", (name, task.strip(), branch, str(folder), now, now))
+            db.execute("INSERT OR REPLACE INTO branches (branch, agent, since) VALUES (?, ?, ?)", (branch, name, now))
             _insert_claims(db, ctx.cfg, name, wanted)
     except sqlite3.IntegrityError:  # another `praxis start` with the same name won the race
         raise PraxisError(f"{name} was started by someone else at the same moment. Pick another name.") from None
     made_branch = False
+    gitops.agent_folder(folder, name, task.strip())
     try:
         folder.parent.mkdir(parents=True, exist_ok=True)
         if gitops.branch_exists(ctx.repo.root, branch):
@@ -408,6 +426,8 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str]) -> Path:
         with ctx.store.write() as db:
             db.execute("DELETE FROM claims WHERE agent = ?", (name,))
             db.execute("DELETE FROM agents WHERE name = ?", (name,))
+            if made_branch:
+                db.execute("DELETE FROM branches WHERE branch = ?", (branch,))
         if folder.is_dir() and not gitops.is_worktree_of(folder, ctx.repo.common):
             shutil.rmtree(folder, ignore_errors=True)  # a half-made checkout of committed files only
         gitops.git(["worktree", "prune"], ctx.repo.root, check=False)
@@ -421,6 +441,9 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str]) -> Path:
                 f"then start {name} again (or set a shorter worktree_root in praxis.toml). Nothing was kept."
             ) from exc
         raise
+    if ctx.cfg.share:
+        from agent_praxis import hooks
+        hooks.link_shares(ctx, folder)
     ctx.say(f"{name} is ready to work on \"{task.strip()}\".")
     ctx.say(f"Its own folder is: {folder}")
     ctx.say("Work ONLY in that folder.")
@@ -529,7 +552,6 @@ class Look:
     error: BaseException | None = None  # reading past the folder check failed
 
 
-AGENT_BRANCHES = "refs/heads/" + BRANCH_PREFIX
 LOOK_THREADS = 8
 
 
@@ -539,7 +561,8 @@ def look_at_agents(ctx: Ctx, rows: list) -> dict[str, Look]:
     The answers are the ones folder_state, unlanded and last_activity give."""
     if not rows:
         return {}
-    tips = gitops.branch_tips(ctx.repo.root, [AGENT_BRANCHES])
+    agent_branches = "refs/heads/" + ctx.cfg.branch_prefix
+    tips = gitops.branch_tips(ctx.repo.root, [agent_branches])
     main_ref = f"refs/heads/{ctx.cfg.main_branch}"
 
     def read(row) -> Look:
@@ -552,7 +575,7 @@ def look_at_agents(ctx: Ctx, rows: list) -> dict[str, Look]:
         try:
             usable = folder.exists() and folder.is_dir() and bool(is_worktree)  # folder_state's "ok"
             branch_ref = f"refs/heads/{row['branch']}"
-            if branch_ref.startswith(AGENT_BRANCHES):
+            if branch_ref.startswith(agent_branches):
                 tip, stamp = tips.get(branch_ref, (None, None))
             else:
                 tip = gitops.rev(ctx.repo.root, branch_ref)
@@ -659,6 +682,7 @@ def _remove_folder(ctx: Ctx, row, links_checked: bool = False, subs: list[str] |
 def _take_folder_away(ctx: Ctx, row, folder: Path, subs: list[str]) -> None:
     """The removal itself, once every check has passed: ignored files kept, submodules let go, folder removed."""
     dest = paths.fresh_folder(ctx.repo.state_dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}")
+    _unlink_shares(ctx, folder)  # first: they are links to the main folder's one copy, never this agent's files
     _keep_ignored(ctx, row, folder, dest)
     for sub in subs:  # deinit below deletes a submodule's files, ignored ones included
         _keep_ignored(ctx, row, folder / sub, dest / sub, label=f"{row['name']}'s submodule {sub}")
@@ -685,6 +709,19 @@ def _take_folder_away(ctx: Ctx, row, folder: Path, subs: list[str]) -> None:
         else:
             why = "Run the same command again after fixing what git says below."
         raise PraxisError(f"Could not remove the folder {folder}. {why}\ngit said: {said}")
+
+
+def _unlink_shares(ctx: Ctx, folder: Path) -> None:
+    """Remove the links `praxis start` made for praxis.toml's share folders, as links: what they point to (the
+    main folder's copy) is never touched."""
+    for rel in ctx.cfg.share:
+        link = folder / rel.replace("\\", "/").strip("/")
+        if _is_link(str(link)):
+            try:
+                _unlink(str(link))
+            except OSError as exc:
+                raise PraxisError(f"Could not remove the shared-folder link {link} ({exc}). Nothing it points to was "
+                                  "touched. Close any program using it, then run the same command again.") from exc
 
 
 def _refuse_unsaved_submodules(row, folder: Path, subs: list[str] | None = None) -> None:
@@ -875,6 +912,7 @@ def _forget(ctx: Ctx, name: str) -> None:
         db.execute("DELETE FROM agents WHERE name = ?", (name,))
         db.execute("DELETE FROM queue WHERE agent = ?", (name,))
         db.execute("DELETE FROM removing WHERE agent = ?", (name,))
+        db.execute("DELETE FROM branches WHERE agent = ?", (name,))
 
 
 def done(ctx: Ctx, name: str) -> None:
@@ -930,7 +968,8 @@ def abandon(ctx: Ctx, name: str) -> str | None:
         refuse_links_git_walks_into(row, folder, scan)  # before committing: git would save what a junction points to
         gitops.abort_operation(folder)
         if gitops.dirty_files(folder):
-            gitops.commit(folder, f"praxis: unfinished work by {row['name']}, saved when it was abandoned")
+            message = f"praxis: unfinished work by {row['name']}, saved when it was abandoned"
+            gitops.commit(folder, ctx.cfg.with_trailers(message, row["name"], row["task"]))
         head = gitops.rev(folder, "HEAD")
         tip = gitops.rev(root, f"refs/heads/{row['branch']}")
         if head and head != tip and gitops.commits_not_in(root, [head], [main, tip]):
@@ -960,7 +999,7 @@ def abandon(ctx: Ctx, name: str) -> str | None:
         ctx.say(f"Its unfinished work ({ahead} saved change(s)) was NOT deleted. It is kept on the branch "
                 f"{' and the branch '.join(saved)}.")
         ctx.say(f"To carry on from it: git branch -m {saved[0]} {row['branch']}  (in the main folder), then "
-                f"praxis start {row['name']} \"<task>\" <files>  picks it up.")
+                f"praxis start {row['name']} \"<task>\" <files> --reuse-branch  picks it up.")
     else:
         ctx.say("It had no unfinished work, so nothing needed saving.")
     return saved[0] if saved else None

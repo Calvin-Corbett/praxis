@@ -51,7 +51,11 @@ POLL_SECONDS = 0.3
 
 def ticket_alive(store: Store, token: str) -> bool:
     """True while the process that holds this ticket is still running (it keeps the ticket's file locked)."""
-    path = store.dir / "queue" / f"{token}.lock"
+    return held(store.dir / "queue" / f"{token}.lock")
+
+
+def held(path: Path) -> bool:
+    """True while some running process keeps the file at *path* locked."""
     if not path.exists():
         return False
     try:

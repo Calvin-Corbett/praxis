@@ -183,15 +183,94 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis claim <agent> <files...>` | Claim more files or folders. Asset files become locks. |
 | `praxis unclaim <agent> <files...>` | Let go of files. |
 | `praxis land <agent>` | Test the agent's work and add it to the main version. `--done` also finishes it. |
+| `praxis land <agent> --background` | The same, but returns as soon as the landing has its place in line. |
+| `praxis wait <agent>` | Follow a background landing to its end: its output, result and exit code. |
 | `praxis status` | One page: who is doing what, locks, the line, what needs you, recent landings. |
 | `praxis done <agent>` | Finish an agent whose work has landed. |
 | `praxis abandon <agent>` | Stop an agent. Unlanded work is saved on a branch named `praxis-saved/...`. |
 | `praxis blocked <agent> "<why>"` | An agent asks you for help; it is paused until you answer. |
 | `praxis resume <agent>` | You answered; the agent may carry on. |
 | `praxis release-stale [agent...]` | Free the files of agents that went quiet for a long time. |
+| `praxis setup <agent>` | Run praxis.toml's `setup` command in the agent's folder again. |
+
+`praxis start` refuses a branch with the agent's name that Praxis did not make (it may be someone's work). Add
+`--reuse-branch` to carry on from it on purpose.
 
 File names can be written with `/` or `\`, and upper/lower case does not matter. They are read from the
 folder you are in, the way a terminal reads them (so from `scripts/`, `player.gd` means `scripts/player.gd`).
+
+### Landing in the background
+
+Many AI tools end a command after about 10 minutes, and a full check can take longer. Run
+`praxis land <agent> --background`: it returns as soon as the landing has its place in the landing line and
+says so. The landing itself carries on in a process of its own, with no window, that keeps going when the
+command (or the tool's shell) that started it ends. Its output goes to the agent's land log,
+`.git/praxis/background/<agent>.log`.
+
+`praxis wait <agent>` waits (as long as it takes) until that landing ends, then prints its output and ends with
+the same exit code `praxis land` would have. Run it again as often as you like: it reports the same result.
+When no landing is running, it reports how the agent's last landing ended.
+
+### Exit codes
+
+The check command tells Praxis what happened by its exit code:
+
+| Check exit code | Meaning | What Praxis does |
+|---|---|---|
+| 0 | the project works | lands the work |
+| 3 | a problem that is not the agent's doing (a tool or service it needs is down) | does not land, says it needs the human, and never counts it towards pausing the agent |
+| anything else | the agent's change broke something | does not land; the agent fixes it and lands again |
+
+Praxis's own exit codes: **0** done; **1** refused, and the message says why (nothing was changed);
+**2** not landed, or a step failed (`praxis start` whose setup command failed), and the message says why (work
+is always kept); **3** Praxis hit a problem it did not expect; **130** stopped with Ctrl+C.
+
+---
+
+## Settings for bigger projects
+
+All of these live in `praxis.toml`, and `praxis init` writes each one with a note. Praxis checks every setting's
+name and form, and stops with a plain message if one is wrong.
+
+**`branch_prefix`** (default `"praxis/"`): the start of every agent's branch name. It must be the start of a
+valid git branch name and end with `/`, for example `"agents/"`.
+
+**`setup`**: a command run once in each new agent folder right after `praxis start` makes it, for example
+`"npm install"`. It runs in the agent's folder with `PRAXIS_AGENT` and `PRAXIS_TASK` set, no keyboard, no window
+and no time limit; its output goes to a log in `.git/praxis/logs/` and Praxis prints a short summary. If it
+fails, the folder stays, `praxis start` says so (exit code 2), and `praxis setup <agent>` runs it again.
+
+**`share`**: folders git ignores in the main folder (for example `["desktop/node_modules"]`) that each new agent
+folder links to instead of getting a copy: a junction on Windows, a symbolic link elsewhere. **All agents then
+share one copy**: a check or setup command that writes into it changes it for every agent and for the main
+folder. A share that git tracks, does not ignore, or that is not a folder in the main folder is skipped with a
+warning. `praxis done` and `praxis abandon` remove these links as links; what they point to is never touched.
+
+**`after_land`**: a command run in the main folder after each landing has moved the main branch and been
+recorded, for example to rebuild or restart something. Praxis sets `PRAXIS_AGENT`, `PRAXIS_TASK` and
+`PRAXIS_COMMIT` (the new main commit) for it. If it fails, Praxis prints a warning: the landing is done and
+stays done.
+
+**`commit_trailers`**: lines added as git trailers to every commit Praxis writes itself (saving an agent's
+unsaved work when it lands, an abandoned agent's leftovers, and the joined commit when a landing joins an agent's
+commits into one). `{agent}` and `{task}` are filled in, for example `["Agent: {agent}", "Task: {task}"]`.
+Commits an agent makes itself are left as they are.
+
+**`env`**: extra environment variables for the check, `setup` and `after_land`, for example
+`env = { TEMP = "D:/tmp", TMP = "D:/tmp" }`. Values are text.
+
+**Signed commits.** If the project signs its commits (`commit.gpgsign = true` in git's settings), the commits
+Praxis writes are signed too, with the key and program git is set up to use.
+
+**Git hooks.** Every git command Praxis runs inside an agent's folder (and the check) has `PRAXIS_AGENT` and
+`PRAXIS_TASK` set, so a project's git hooks can tell an agent's commit, and which agent, from a person's.
+
+### Several versions of Praxis
+
+Praxis keeps a format number in its database (`.git/praxis/praxis.db`). A newer Praxis brings an older
+database up to date by itself, in one step that cannot be left half-done. An older Praxis that finds a database
+from a newer one refuses every command ("this project was used by a newer Praxis") instead of guessing, so
+several Praxis versions can be installed side by side safely.
 
 ---
 
@@ -218,6 +297,20 @@ first runs `praxis done`.
 **"NOT landed: the check failed"**
 The agent's change broke the check. Praxis printed the end of the check's output and kept the agent's work.
 The agent should fix it and land again. The full output is saved; the message says where.
+
+**"the check reported a problem outside this agent's work"**
+The check ended with exit code 3: it found a problem the agent did not cause (a tool or service it needs is
+broken). Nothing landed and the agent's tries are not counted against it. Fix what the check reports, then land
+again.
+
+**"A branch named ... already exists, and Praxis did not make it"**
+`praxis start` found a branch with the agent's name that Praxis did not make for it. It may hold someone's work,
+so Praxis leaves it alone. Pick another name, or add `--reuse-branch` to carry on from that branch on purpose
+(this is also how to pick up work `praxis abandon` saved).
+
+**"This project was used by a newer Praxis"**
+A newer Praxis has used this project, and this one does not know its database format. Update Praxis, or use the
+newer one for this project.
 
 **"its changes clash with newer work"**
 Another agent landed a change to the same lines first. The agent's work is safe. The message tells the agent
@@ -306,7 +399,9 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
   them.
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import
   copies of your project). Change this with `worktree_root` in praxis.toml.
-- Each agent works on its own git branch, `praxis/<name>`.
+- Each agent works on its own git branch, `praxis/<name>` (`branch_prefix` in praxis.toml changes the start).
+- Background landings write to `.git/praxis/background/<agent>.log`; setup, after_land and check output go to
+  `.git/praxis/logs/`.
 
 Praxis never pushes anything to the internet, and never deletes work that has not landed. What it removes is
 either already in the main version or a cache your tools rebuild, and it tells you when it does.

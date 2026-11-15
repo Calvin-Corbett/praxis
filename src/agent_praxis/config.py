@@ -39,6 +39,18 @@ class Config:
     stale_after_hours: float = 24.0
     engines: list[str] = field(default_factory=list)
     check_may_change: list[str] = field(default_factory=list)
+    branch_prefix: str = "praxis/"
+    after_land: str = ""
+    commit_trailers: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    setup: str = ""
+    share: list[str] = field(default_factory=list)
+
+    def with_trailers(self, message: str, agent: str, task: str) -> str:
+        """*message* with the commit_trailers lines added as git trailers (after a blank line), for a commit
+        Praxis itself writes."""
+        lines = [line.format(agent=agent, task=task) for line in self.commit_trailers]
+        return message.rstrip("\n") + ("\n\n" + "\n".join(lines) if lines else "") + "\n"
 
     def worktree_dir(self, project_root: Path) -> Path:
         if self.worktree_root:
@@ -123,7 +135,41 @@ enough_after = {cfg.enough_after}
 
 # Show an agent's claims as stale after this many hours with no sign of work.
 stale_after_hours = {cfg.stale_after_hours:g}
+
+# The start of every agent's branch name: an agent called claude-1 works on "praxis/claude-1".
+branch_prefix = {_q(cfg.branch_prefix)}
+
+# A command Praxis runs in a new agent's folder right after `praxis start` makes it (for example
+# "npm install"). If it fails the folder stays; run it again with `praxis setup <agent>`.
+setup = {_q(cfg.setup)}
+
+# Folders git ignores that every agent folder links to instead of getting its own copy (for example
+# ["node_modules"]). All agents then share ONE copy: a check that writes into it changes it for everyone.
+share = [{", ".join(_q(p) for p in cfg.share)}]
+
+# A command run in the main folder after each landing (for example to restart a server). Praxis sets
+# PRAXIS_AGENT, PRAXIS_TASK and PRAXIS_COMMIT for it. If it fails, Praxis warns; the landing stays.
+after_land = {_q(cfg.after_land)}
+
+# Lines added as git trailers to the commits Praxis writes itself (saving an agent's unsaved work, the
+# leftovers of an abandoned agent, joined commits), for example ["Agent: {{agent}}"]. {{agent}} and {{task}}
+# are filled in. Commits an agent makes itself are left as they are.
+commit_trailers = [{", ".join(_q(p) for p in cfg.commit_trailers)}]
+
+# Extra environment variables for the check, setup and after_land commands, for example
+# env = {{ TEMP = "D:/tmp", TMP = "D:/tmp" }}
+env = {_inline_table(cfg.env)}
 """
+
+
+def _inline_table(values: dict[str, str]) -> str:
+    if not values:
+        return "{}"
+    return "{ " + ", ".join(f"{_key(k)} = {_q(v)}" for k, v in values.items()) + " }"
+
+
+def _key(name: str) -> str:
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else _q(name)
 
 
 def parse_toml(text: str) -> dict:
@@ -157,6 +203,9 @@ def _value(raw: str, line_no: int):
         return raw == "true"
     if raw.startswith("["):
         return [_value(item, line_no) for item in re.findall(_STRING, raw)]
+    if raw.startswith("{") and raw.endswith("}"):  # an inline table of text values: { TEMP = "D:/tmp" }
+        pairs = re.findall(rf"({_STRING}|[A-Za-z0-9_-]+)\s*=\s*({_STRING})", raw[1:-1])
+        return {(_value(k, line_no) if k[0] in "\"'" else k): _value(v, line_no) for k, v in pairs}
     try:
         return float(raw) if "." in raw else int(raw)
     except ValueError:
@@ -232,6 +281,8 @@ def load(root: Path) -> Config:
     cfg.enough_after = max(2, cfg.enough_after)
     if cfg.land_method not in ("rebase", "merge"):
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
+    _check_branch_prefix(cfg.branch_prefix)
+    _check_trailers(cfg.commit_trailers)
     if any(ch in cfg.check for ch in "\b\t\f\r\n\v"):
         raise PraxisError(
             "praxis.toml: the check line holds a hidden control character. In TOML a backslash inside double quotes "
@@ -241,11 +292,43 @@ def load(root: Path) -> Config:
     return cfg
 
 
+_BAD_REF = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//")
+
+
+def _check_branch_prefix(prefix: str) -> None:
+    """branch_prefix must be the start of a valid git branch name, ending with "/" (like "praxis/")."""
+    parts = prefix[:-1].split("/") if prefix.endswith("/") else []
+    bad = (not parts or _BAD_REF.search(prefix) or prefix.startswith("-")
+           or any(not p or p.startswith(".") or p.endswith((".lock", ".")) or p == "@" for p in parts))
+    if bad:
+        raise PraxisError(
+            f"praxis.toml: branch_prefix {prefix!r} cannot start a git branch name. Use letters, numbers, '-', '_' "
+            "or '.', with folders split by \"/\", and end it with \"/\", for example branch_prefix = \"praxis/\"."
+        )
+
+
+def _check_trailers(lines: list[str]) -> None:
+    import string
+
+    for line in lines:
+        try:
+            names = {name for _text, name, _spec, _conv in string.Formatter().parse(line) if name is not None}
+        except ValueError:
+            names = {"?"}
+        if names - {"agent", "task"} or "\n" in line:
+            raise PraxisError(
+                f"praxis.toml: the commit_trailers line {line!r} can only use {{agent}} and {{task}} (write {{{{ "
+                "and }} for a brace itself), and must be one line, for example \"Agent: {agent}\"."
+            )
+
+
 # Every setting Praxis reads, with the kind of value it must be.
 _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
-          "land_method": str, "enough_after": int, "stale_after_hours": float}
+          "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str,
+          "setup": str, "share": list, "after_land": str, "commit_trailers": list, "env": dict}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
-               int: "a whole number, like 3", float: "a number, like 24"}
+               int: "a whole number, like 3", float: "a number, like 24",
+               dict: 'a table of names and text values, like { TEMP = "D:/tmp" }'}
 
 
 def _typed(name: str, value):
@@ -254,6 +337,8 @@ def _typed(name: str, value):
         ok = isinstance(value, str)
     elif kind is list:
         ok = isinstance(value, list) and all(isinstance(v, str) for v in value)
+    elif kind is dict:
+        ok = isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
     elif kind is int:
         ok = isinstance(value, int) and not isinstance(value, bool)
     else:

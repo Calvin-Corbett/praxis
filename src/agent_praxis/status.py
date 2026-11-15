@@ -23,6 +23,20 @@ def when(stamp: float) -> str:
     return time.strftime("%b %d %H:%M", time.localtime(stamp))
 
 
+def _places(line: list, alive: dict) -> dict[str, str]:
+    """{agent: where it is in the landing line} for every agent with a running landing."""
+    places, ahead = {}, 0
+    for q in line:
+        if not alive[q["id"]]:
+            continue
+        if q["started"]:
+            places[q["agent"]] = "landing now"
+        else:
+            places[q["agent"]] = f"waiting in the landing line, place {ahead + 1} ({ahead} ahead)"
+        ahead += 1
+    return places
+
+
 def render(ctx: Ctx) -> str:
     now = time.time()
     store, cfg = ctx.store, ctx.cfg
@@ -53,6 +67,9 @@ def render(ctx: Ctx) -> str:
         out.append("Nothing needs you right now.")
         out.append("")
 
+    line = store.rows("SELECT * FROM queue ORDER BY id")
+    alive = {q["id"]: ticket_alive(store, q["token"]) for q in line}
+    places = _places(line, alive)
     out.append(f"WORKING NOW ({len(agents)} agent{'s' if len(agents) != 1 else ''})" if agents else "WORKING NOW: nobody")
     for a in agents:
         mine = [c for c in claims if c["agent"] == a["name"]]
@@ -66,6 +83,8 @@ def render(ctx: Ctx) -> str:
             out.append("      asset locks: " + ", ".join(assets))
         if a["released"]:
             out.append(f"      note: {a['released']}")
+        if a["name"] in places:
+            out.append(f"      landing: {places[a['name']]}")
         try:
             look = looks[a["name"]]
             where = folder_state(ctx, a, look.is_worktree)
@@ -102,10 +121,9 @@ def render(ctx: Ctx) -> str:
         out.append(f"  - {c['path']}  held by {c['agent']} since {ago(c['since'], now)}")
     out.append("")
 
-    line = store.rows("SELECT * FROM queue ORDER BY id")
     out.append("LANDING LINE" if line else "LANDING LINE: empty")
     for n, q in enumerate(line, 1):
-        if not ticket_alive(store, q["token"]):
+        if not alive[q["id"]]:
             out.append(f"  {n}. {q['agent']}: its landing stopped part-way (its process ended), so it may not have "
                        f"finished. Whether its work landed shows under RECENT LANDINGS below and on the branch "
                        f"{cfg.main_branch}. The next landing clears this line.")

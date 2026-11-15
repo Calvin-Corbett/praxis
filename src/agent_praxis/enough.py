@@ -11,8 +11,9 @@ import hashlib
 import itertools
 import re
 
-# Landing failures caused by the main folder or by someone outside Praxis. Pausing the agent would not help.
-NOT_THE_AGENTS = frozenset({"main-folder", "busy-main"})
+# Landing failures caused by the main folder, by someone outside Praxis, or that the check itself says are not the
+# agent's doing (its exit code 3, "needs-human"). Pausing the agent would not help.
+NOT_THE_AGENTS = frozenset({"main-folder", "busy-main", "needs-human"})
 
 _PYTEST = re.compile(r"(\d+) (failed|errors?)\b")
 _NODE = re.compile(r"^(?:FAILED|ERROR)\b", re.MULTILINE)

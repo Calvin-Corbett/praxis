@@ -21,7 +21,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import enough, gitops, paths
+from agent_praxis import enough, gitops, hooks, paths
 from agent_praxis.agents import (
     JOINING_PREFIX,
     PARALLEL_CHECKOUT,
@@ -46,6 +46,8 @@ KEEP_LOGS = 200
 KEEP_LOG_BYTES = 1024 ** 3  # the check logs together stay under this (oldest go first), apart from the newest one
 HEARTBEAT_SECONDS = 60  # while a check runs, say it is still running this often, so nobody thinks it hung
 RETRIES_WHEN_MAIN_MOVES = 3
+NEEDS_THE_HUMAN = 3  # a check's exit code saying: the problem is not this agent's doing, a person must look
+MAIN_MOVED = "main moved"  # _advance's answer when another writer moved main just before Praxis could
 
 
 def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
@@ -80,7 +82,7 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
     refuse_links_git_walks_into(row, folder)  # before committing: git would save what a junction points to
     ctx.store.touch(name)
     try:
-        if gitops.commit(folder, f"{row['task']} (by {name})"):
+        if gitops.commit(folder, ctx.cfg.with_trailers(f"{row['task']} (by {name})", name, row["task"])):
             ctx.say("Saved your changes as a commit.")
     except gitops.GitError as exc:
         return _fail(ctx, row, "commit", "git would not save the changes as a commit",
@@ -196,9 +198,11 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
         log = None
         if ctx.cfg.check.strip():
             ctx.say(f"Running the check: {ctx.cfg.check}")
-            passed, output, log = _run_check(ctx, row, folder)
+            code, output, log = _run_check(ctx, row, folder)
             _put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
-            if not passed:
+            if code == NEEDS_THE_HUMAN:
+                return _needs_the_human(ctx, row, output, log)
+            if code != 0:
                 count = enough.problem_count(output)
                 tail = "\n".join(output.rstrip().splitlines()[-TAIL_LINES:])
                 return _fail(ctx, row, "check", "the check failed" + (f" ({count} problem(s))" if count else ""),
@@ -214,6 +218,11 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
         summary = "check passed" if ctx.cfg.check.strip() else "no check is set, so nothing was tested"
         progress.update(checked=checked, summary=summary, log=log)
         advanced = _advance(ctx, row, base, checked)
+        if advanced == MAIN_MOVED:
+            progress.clear()
+            ctx.say("The main version changed just as Praxis was moving it forward. Doing it again on top of the "
+                    "newest version.")
+            continue
         if advanced is not True:
             progress.clear()
             return _fail(ctx, row, "main-folder", "the main version could not be moved forward safely", advanced)
@@ -221,12 +230,23 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
         _record_landing(ctx, row, summary, log, tip)
         progress["recorded"] = True
         ctx.say(f"Landed: {row['name']}'s work on \"{row['task']}\" is now in {main} ({summary}).")
+        hooks.run_after_land(ctx, row, tip)
         if not finish:
             ctx.say(f"When the task is finished: praxis done {row['name']}")
         return True
     return _fail(ctx, row, "busy-main", "the main version kept changing during the check",
                  f"The main version changed {RETRIES_WHEN_MAIN_MOVES} times while Praxis was checking. "
                  "Someone is committing to it directly, outside Praxis. Land again when that stops.")
+
+
+def _needs_the_human(ctx: Ctx, row, output: str, log: str) -> bool:
+    tail = "\n".join(output.rstrip().splitlines()[-TAIL_LINES:])
+    return _fail(ctx, row, "needs-human", "the check reported a problem outside this agent's work",
+                 f"The check ended with exit code {NEEDS_THE_HUMAN}, which means it found a problem that is not "
+                 "this agent's doing (for example a tool or service it needs is broken), so nothing landed. This "
+                 "does not count against the agent's tries.\nThis needs the human: fix what the check reports, then "
+                 f"land again. The end of its output:\n{tail}\nFull output: {log}",
+                 log=log, sig_text=output)
 
 
 def _held_by_others(ctx: Ctx, row, changed: list[str], note: bool = False) -> list[str]:
@@ -296,8 +316,9 @@ def _rebase_as_one(ctx: Ctx, row, folder: Path) -> list[str] | None:
     # clashes, the branch goes back to the original commits. A landing killed at any point leaves the folder on
     # its own branch, holding either the original commits or the joined one, and the originals stay kept.
     messages = gitops.out(["log", "--reverse", "--format=%B", f"{fork}..{original}"], folder)
-    joined = gitops.git([*gitops.identity_args(folder), "commit-tree", f"{original}^{{tree}}", "-p", fork],
-                        folder, check=False, stdin=f"{row['task']} (by {row['name']})\n\n{messages}\n")
+    message = ctx.cfg.with_trailers(f"{row['task']} (by {row['name']})\n\n{messages}", row["name"], row["task"])
+    joined = gitops.git([*gitops.identity_args(folder), "commit-tree", *gitops.sign_args(folder),
+                         f"{original}^{{tree}}", "-p", fork], folder, check=False, stdin=message)
     if joined.returncode != 0:
         return []
     keep = f"{JOINING_PREFIX}{row['name']}"
@@ -421,9 +442,9 @@ def _new_log(logs: Path, agent: str) -> Path:
     return log
 
 
-def _run_check(ctx: Ctx, row, folder: Path) -> tuple[bool, str, str]:
-    env = dict(os.environ, PRAXIS_AGENT=row["name"])
-    env.setdefault("PYTHONIOENCODING", "utf-8")  # a Python check printing a non-English path must not crash
+def _run_check(ctx: Ctx, row, folder: Path) -> tuple[int, str, str]:
+    """(the check's exit code, the end of its output, its log)."""
+    env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
     logs = ctx.store.dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = _new_log(logs, row["name"])
@@ -454,7 +475,7 @@ def _run_check(ctx: Ctx, row, folder: Path) -> tuple[bool, str, str]:
             data = data[data.find(b"\n") + 1:]
         output = _decode(data)
     _prune_logs(logs, keep=log)
-    return proc.returncode == 0, output, str(log)
+    return proc.returncode, output, str(log)
 
 
 def _wait_saying_so(ctx: Ctx, proc: subprocess.Popen, log: Path) -> None:
@@ -577,11 +598,17 @@ def _advance(ctx: Ctx, row, base: str, target: str):
                 "then land again.")
     where = gitops.branch_checked_out_at(root, main, entries)
     if where is None:
-        gitops.git(["update-ref", f"refs/heads/{main}", target, base], root)
-        return True
+        moved = gitops.git(["update-ref", f"refs/heads/{main}", target, base], root, check=False)
+        if moved.returncode == 0:
+            return True
+        if gitops.rev(root, f"refs/heads/{main}") != base:
+            return MAIN_MOVED
+        raise gitops.GitError(["update-ref", f"refs/heads/{main}", target, base], moved)
     proc = gitops.git([*PARALLEL_CHECKOUT, "merge", "--ff-only", "-q", target], where, check=False)
     if proc.returncode == 0:
         return True
+    if gitops.rev(root, f"refs/heads/{main}") != base:  # another writer moved main just now: not a real problem
+        return MAIN_MOVED
     said = (proc.stderr or proc.stdout).strip()
     clashing = set(gitops.dirty_files(where)) & set(gitops.changed_files(root, base, target))
     if clashing:

@@ -19,6 +19,8 @@ Everyday commands:
   praxis start <agent> "<task>" <files...>      give an agent its own folder and claim its files
   praxis claim <agent> <files...>               claim more files or folders (asset files get locked)
   praxis land <agent>                           test the agent's work and put it into the main version
+  praxis land <agent> --background              the same, carrying on after this command returns
+  praxis wait <agent>                           follow a background landing to its end
   praxis status                                 see who is doing what, and what needs you
   praxis done <agent>                           finish: release its files and remove its folder
 
@@ -28,6 +30,10 @@ When things go wrong:
   praxis abandon <agent>                        stop an agent; unlanded work is saved on a branch
   praxis release-stale [agent...]               free the files of agents that went quiet
   praxis unclaim <agent> <files...>             let go of files
+  praxis setup <agent>                          run praxis.toml's setup command in the agent's folder again
+
+Exit codes: 0 done, 1 refused (the message says why; nothing was changed), 2 not landed or a step failed (the
+message says why; work is kept), 3 Praxis hit a problem it did not expect, 130 stopped with Ctrl+C.
 """
 
 
@@ -44,6 +50,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("agent")
     s.add_argument("task")
     s.add_argument("files", nargs="*")
+    s.add_argument("--reuse-branch", action="store_true",
+                   help="carry on from an existing branch with the agent's name that Praxis did not make")
 
     for name, text in (("claim", "claim more files or folders"), ("unclaim", "let go of files")):
         s = sub.add_parser(name, help=text)
@@ -53,6 +61,15 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("land", help="test an agent's work and land it")
     s.add_argument("agent")
     s.add_argument("--done", action="store_true", help="also finish the agent after it lands")
+    s.add_argument("--background", action="store_true",
+                   help="return once the landing has its place in line; follow it with `praxis wait <agent>`")
+    s.add_argument("--in-background", action="store_true", help=argparse.SUPPRESS)  # the background process itself
+
+    s = sub.add_parser("wait", help="follow an agent's background landing to its end")
+    s.add_argument("agent")
+
+    s = sub.add_parser("setup", help="run praxis.toml's setup command in an agent's folder again")
+    s.add_argument("agent")
 
     sub.add_parser("status", help="show who is doing what")
 
@@ -75,6 +92,12 @@ def _ctx() -> tuple[Ctx, Store]:
     repo = gitops.find_repo()
     cfg = config.load(repo.root)
     store = Store(repo.state_dir)
+    try:
+        for row in store.agents():  # git hooks in an agent's folder can tell which agent is committing
+            gitops.agent_folder(row["worktree"], row["name"], row["task"])
+    except BaseException:
+        store.close()
+        raise
     return Ctx(repo=repo, cfg=cfg, store=store, say=_say), store
 
 
@@ -97,14 +120,19 @@ def run(argv: list[str]) -> int:
     try:
         cmd = args.command
         if cmd == "start":
-            agents.start(ctx, args.agent, args.task, args.files)
+            agents.start(ctx, args.agent, args.task, args.files, reuse_branch=args.reuse_branch)
+            return _setup(ctx, args.agent)
         elif cmd == "claim":
             agents.claim(ctx, args.agent, args.files)
         elif cmd == "unclaim":
             agents.unclaim(ctx, args.agent, args.files)
         elif cmd == "land":
-            from agent_praxis import landing
-            return 0 if landing.land(ctx, args.agent, finish=args.done) else 2
+            return _land(ctx, args)
+        elif cmd == "wait":
+            from agent_praxis import background
+            return background.wait(ctx, args.agent)
+        elif cmd == "setup":
+            return _setup(ctx, args.agent, again=True)
         elif cmd == "status":
             from agent_praxis import status
             sys.stdout.write(status.render(ctx))
@@ -123,14 +151,47 @@ def run(argv: list[str]) -> int:
         store.close()
 
 
+def _land(ctx: Ctx, args) -> int:
+    from agent_praxis import background, landing
+
+    if args.background and not args.in_background:
+        return background.start(ctx, args.agent, finish=args.done)
+    if args.in_background:
+        name = agents.check_name(args.agent)
+        return background.run_child(ctx, name, lambda: _guarded(
+            lambda: 0 if landing.land(ctx, args.agent, finish=args.done) else 2))
+    return 0 if landing.land(ctx, args.agent, finish=args.done) else 2
+
+
+def _setup(ctx: Ctx, name: str, again: bool = False) -> int:
+    """Run praxis.toml's setup command in the agent's folder: 0 when it passed (or there is none), else 2."""
+    from agent_praxis import hooks
+
+    row = agents.need_agent(ctx, name)
+    if again:
+        agents.refuse_other_agents_folder(ctx, row, "set up")
+        if agents.folder_state(ctx, row) != "ok":
+            raise PraxisError(f"{row['name']}'s folder {row['worktree']} is missing or damaged, so its setup cannot "
+                              "run. Run `praxis status` to see what to do.")
+        if not ctx.cfg.setup.strip():
+            ctx.say("No setup command is set in praxis.toml (setup = \"...\"), so there is nothing to run.")
+            return 0
+    return 0 if hooks.run_setup(ctx, row) else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:  # UTF-8, so a folder named "My Gäme" prints the same in Git Bash, a pipe or an AI tool as on screen
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    return _guarded(lambda: run(sys.argv[1:] if argv is None else argv))
+
+
+def _guarded(fn) -> int:
+    """Run *fn* (which returns an exit code), turning any problem into a plain message and Praxis's exit code."""
     try:
-        return run(sys.argv[1:] if argv is None else argv)
+        return fn()
     except PraxisError as exc:
         print(f"Praxis: {exc}", file=sys.stderr, flush=True)
         return 1

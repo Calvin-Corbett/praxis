@@ -37,7 +37,10 @@ only changes the text between the two praxis marker lines.)
    Praxis saves (commits) your work, puts it on top of the newest version, runs the
    project check and lands it only if the check passes. It may wait in line for other
    agents first: waiting is normal and never fails. Landing can take many minutes, so run
-   it with a long time limit (or in the background) and never stop it part-way.
+   it with a long time limit and never stop it part-way. If your tool ends commands after a
+   few minutes, run `praxis land <your-name> --background` instead, then
+   `praxis wait <your-name>` (run it again if it is cut off) to see how the landing ended.
+   If the check says the problem is outside your work, tell the human; do not try to fix it.
 7. If landing fails, read the failure text Praxis prints, fix the problem in your folder,
    and run `praxis land <your-name>` again. Your work is always kept.
 8. When your task is finished and landed, finish from the main project folder (a folder
@@ -46,7 +49,7 @@ only changes the text between the two praxis marker lines.)
 9. If you are stuck (the same failure keeps coming back, or you need a decision from
    the human), STOP. Run `praxis blocked <your-name> "<what you need>"` and tell the human.
    Do not keep retrying the same thing.
-10. Stay on the branch Praxis gave you (`praxis/<your-name>`): do not switch, create or delete
+10. Stay on the branch Praxis gave you (usually `praxis/<your-name>`): do not switch, create or delete
    branches. Never run `git push`, `git reset --hard`, `git clean`, or delete folders Praxis
    made. Praxis handles all of that.
 
