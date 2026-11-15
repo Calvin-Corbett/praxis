@@ -38,6 +38,7 @@ class Config:
     enough_after: int = 3
     stale_after_hours: float = 24.0
     engines: list[str] = field(default_factory=list)
+    check_may_change: list[str] = field(default_factory=list)
 
     def worktree_dir(self, project_root: Path) -> Path:
         if self.worktree_root:
@@ -98,6 +99,12 @@ main_branch = {_q(cfg.main_branch)}
 # Praxis runs it before every landing and lands only if it succeeds.
 # Leave it empty ("") and Praxis lands without a check.
 check = {_q(cfg.check)}
+
+# Files the check itself rewrites every time it runs (for example "ProjectSettings/*.asset").
+# Normally a landing stops if any committed file changes while the check runs, because then the
+# check may not have tested what would land. Files listed here are put back to their committed
+# version after the check instead, and the landing goes ahead.
+check_may_change = [{", ".join(_q(p) for p in cfg.check_may_change)}]
 
 # Files git cannot merge (scenes, levels, models, textures, sounds).
 # Only one agent at a time may hold one of these.
@@ -210,6 +217,8 @@ def load(root: Path) -> Config:
             setattr(cfg, name, str(data[name]))
     if "assets" in data:
         cfg.assets = [str(a) for a in data["assets"]]
+    if "check_may_change" in data:
+        cfg.check_may_change = [str(p) for p in data["check_may_change"]]
     if "enough_after" in data:
         cfg.enough_after = max(2, int(data["enough_after"]))
     if "stale_after_hours" in data:

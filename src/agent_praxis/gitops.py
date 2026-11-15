@@ -176,6 +176,22 @@ def ignored_entries(cwd: Path | str) -> list[str]:
     return [item[3:] for item in raw.split("\0") if item.startswith("!! ")]
 
 
+def submodules(cwd: Path | str) -> list[str]:
+    """Checked-out submodules in this folder, nested ones included, as paths relative to it."""
+    if not (Path(cwd) / ".gitmodules").is_file():
+        return []
+    proc = git(["submodule", "foreach", "--quiet", "--recursive", "echo $displaypath"], cwd, check=False)
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def commits_only_here(submodule: Path) -> bool:
+    """True when a submodule's checked-out commit is on none of its remotes (it exists only in this folder)."""
+    if not submodule.is_dir():
+        return False
+    proc = git(["rev-list", "--count", "HEAD", "--not", "--remotes"], submodule, check=False)
+    return proc.returncode == 0 and proc.stdout.strip() not in ("", "0")
+
+
 def is_ignored(cwd: Path | str, path: str) -> bool:
     return git(["check-ignore", "-q", "--", path], cwd, check=False).returncode == 0
 

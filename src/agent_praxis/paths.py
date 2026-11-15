@@ -50,7 +50,11 @@ def normalize(path: str, roots: list[Path]) -> str:
     if not _is_absolute(text):
         here = _here_in(roots)
         if here:
-            text = f"{here}/{text}"
+            from_here = f"{here}/{text}"
+            # Agents are told to give paths from the top of the project. When a path only makes sense from there
+            # (it exists from the top, not from here), read it that way instead of claiming a file that is not there.
+            if exists_in(from_here, roots) or not exists_in(text, roots):
+                text = from_here
     if _is_absolute(text):
         target = Path(text).resolve()
         for root in roots:
@@ -73,6 +77,17 @@ def normalize(path: str, roots: list[Path]) -> str:
             continue
         parts.append(piece)
     return "/".join(parts) if parts else "."
+
+
+def exists_in(path: str, roots: list[Path]) -> bool:
+    """True when *path* (from the top of the project) is a file or folder in any of *roots*."""
+    for root in roots:
+        try:
+            if (root / path).exists():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def key(path: str) -> str:

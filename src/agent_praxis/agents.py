@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_praxis import gitops, paths
+from agent_praxis import config, gitops, paths
 from agent_praxis.config import Config
 from agent_praxis.errors import PraxisError
 from agent_praxis.gitops import Repo
@@ -18,13 +18,15 @@ from agent_praxis.store import Store
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 BRANCH_PREFIX = "praxis/"
 ARCHIVE_PREFIX = "praxis-saved/"
-# Ignored folders that tools rebuild by themselves (engine import caches, build output). `done` deletes these;
-# every other ignored file in an agent's folder is moved somewhere safe instead, because it may be someone's work.
-REBUILT_BY_TOOLS = {
-    ".godot", ".import", "library", "temp", "obj", "logs", "intermediate", "deriveddatacache", "saved", "binaries",
-    "build", "builds", "dist", "out", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".venv", "venv", ".gradle", ".vs", ".idea", "target",
+# The only ignored folders `done` deletes: caches an engine or tool rebuilds by itself, matched exactly. Engine
+# caches count only at the top of an agent's folder, and only for the engine found there. Every other ignored
+# file is moved to .git/praxis/kept instead, because "git ignores it" means "not shared", not "worthless".
+ENGINE_CACHES = {
+    "Unity": {"library", "temp", "obj"},
+    "Unreal": {"intermediate", "deriveddatacache"},
+    "Godot": {".godot", ".import"},
 }
+CACHES_ANYWHERE = {"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
 
 @dataclass
@@ -159,9 +161,11 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def _say_claims(ctx: Ctx, name: str, added: list[str]) -> None:
+    roots = _roots(ctx)
     for path in added:
         kind = "asset file, locked to" if paths.is_asset(path, ctx.cfg.assets) else "claimed by"
-        ctx.say(f"  {path}  ({kind} {name})")
+        new = "" if paths.exists_in(path, roots) else ", does not exist yet: fine for a new file, else check the name"
+        ctx.say(f"  {path}  ({kind} {name}{new})")
 
 
 def claim(ctx: Ctx, name: str, wanted_raw: list[str]) -> list[str]:
@@ -187,10 +191,15 @@ def claim(ctx: Ctx, name: str, wanted_raw: list[str]) -> list[str]:
 def unclaim(ctx: Ctx, name: str, wanted_raw: list[str]) -> None:
     row = need_agent(ctx, name)
     wanted = [paths.key(paths.normalize(p, _roots(ctx, row))) for p in wanted_raw]
+    released, missing = [], []
     with ctx.store.write() as db:
         for k in wanted:
-            db.execute("DELETE FROM claims WHERE agent = ? AND key = ?", (row["name"], k))
-    ctx.say(f"{row['name']} let go of: {', '.join(wanted_raw)}")
+            gone = db.execute("DELETE FROM claims WHERE agent = ? AND key = ?", (row["name"], k)).rowcount
+            (released if gone else missing).append(k)
+    if released:
+        ctx.say(f"{row['name']} let go of: {', '.join(released)}")
+    if missing:
+        ctx.say(f"{row['name']} did not hold: {', '.join(missing)} (nothing to let go of there)")
 
 
 def unlanded(ctx: Ctx, row) -> tuple[int, list[str]]:
@@ -226,30 +235,55 @@ def off_branch(row, folder: Path) -> str | None:
 
 
 def _remove_folder(ctx: Ctx, row) -> None:
+    """Remove an agent's folder whose work is all landed or saved. Never with untracked or changed files in it:
+    callers check that first, and ignored files are moved out (or are rebuildable caches) before this runs."""
     folder = Path(row["worktree"])
+    subs: list[str] = []
     if folder.exists():
         if folder.is_dir():
+            subs = gitops.submodules(folder)
+            stranded = [s for s in subs if gitops.commits_only_here(folder / s)]
+            if stranded:
+                raise PraxisError(
+                    f"These submodules in {row['name']}'s folder have commits that exist nowhere else: "
+                    + ", ".join(stranded) + ". Removing the folder would lose them. Push them first (in each "
+                    "submodule: `git push`), then run the same command again. Nothing was removed."
+                )
             _keep_ignored(ctx, row, folder)
-        proc = gitops.git(["worktree", "remove", str(folder)], ctx.repo.root, check=False)
+            if subs:  # git will not remove a folder with checked-out submodules; their work was checked above
+                gitops.git(["submodule", "deinit", "--all", "--force"], folder, check=False)
+        # --force only gets past git's "contains submodules" refusal: the folder was checked clean above.
+        args = ["worktree", "remove", *(["--force"] if subs else []), str(folder)]
+        proc = gitops.git(args, ctx.repo.root, check=False)
         if proc.returncode != 0 and folder.exists():
-            raise PraxisError(
-                f"Could not remove the folder {folder}. A program (an editor, the game engine, a terminal) "
-                "probably has files open in it. Close it and run the same command again.\n"
-                f"Details: {(proc.stderr or '').strip()}"
-            )
+            said = (proc.stderr or proc.stdout or "").strip()
+            if "locked" in said:
+                why = (f"git has this folder marked as locked. If nothing is using it, run "
+                       f"`git worktree unlock \"{folder}\"`, then the same command again.")
+            elif any(w in said.lower() for w in ("permission", "access", "busy", "used by another")):
+                why = ("A program (an editor, the game engine, a terminal) probably has files open in it. "
+                       "Close it and run the same command again.")
+            else:
+                why = "Run the same command again after fixing what git says below."
+            raise PraxisError(f"Could not remove the folder {folder}. {why}\ngit said: {said}")
     gitops.git(["worktree", "prune"], ctx.repo.root, check=False)
 
 
 def _keep_ignored(ctx: Ctx, row, folder: Path) -> None:
     """Before a folder is removed: delete the caches tools rebuild, and move every other ignored file to a
     safe place, so nothing that might be someone's work disappears silently."""
+    engines, _assets, _check = config.detect(folder)
+    top_caches = set().union(*(ENGINE_CACHES.get(e, set()) for e in engines)) if engines else set()
     rebuilt, kept = [], []
     for rel in gitops.ignored_entries(folder):
         clean = rel.rstrip("/")
         parts = clean.split("/")
-        (rebuilt if any(p.casefold() in REBUILT_BY_TOOLS for p in parts) else kept).append(clean)
+        name = parts[-1].casefold()
+        is_cache = (folder / clean).is_dir() and (
+            (len(parts) == 1 and name in top_caches) or name in CACHES_ANYWHERE)
+        (rebuilt if is_cache else kept).append(clean)
     if rebuilt:
-        ctx.say("Removing tool caches that rebuild themselves: " + ", ".join(rebuilt[:8])
+        ctx.say("Removing caches that rebuild themselves: " + ", ".join(rebuilt[:8])
                 + (f" and {len(rebuilt) - 8} more" if len(rebuilt) > 8 else ""))
     if not kept:
         return
@@ -282,6 +316,12 @@ def done(ctx: Ctx, name: str) -> None:
     row = need_agent(ctx, name)
     folder = Path(row["worktree"])
     if folder.is_dir():
+        if gitops.operation_in_progress(folder):
+            raise PraxisError(
+                f"{row['name']}'s folder has a half-finished git rebase or merge. Finish it (fix the files, then "
+                "`git rebase --continue`), or cancel it (`git rebase --abort`), then run the same command again. "
+                "Nothing was removed."
+            )
         problem = off_branch(row, folder)
         if problem:
             raise PraxisError(f"{problem}\nNothing was removed.")
@@ -317,9 +357,13 @@ def abandon(ctx: Ctx, name: str) -> str | None:
         head = gitops.rev(folder, "HEAD")
         tip = gitops.rev(root, f"refs/heads/{row['branch']}")
         if head and head != tip and gitops.commits_not_in(root, [head], [main, tip]):
-            # Work made off the agent's branch: give it a branch of its own BEFORE the folder goes.
-            other = f"{ARCHIVE_PREFIX}{row['name']}-{stamp}-folder"
-            gitops.git(["branch", other, head], root)
+            # Work made off the agent's branch: give it a branch of its own BEFORE the folder goes
+            # (or reuse the one an earlier, interrupted abandon already made for exactly this work).
+            earlier = gitops.out(["branch", "--list", f"{ARCHIVE_PREFIX}{row['name']}-*-folder",
+                                  "--points-at", head, "--format=%(refname:short)"], root).splitlines()
+            other = earlier[0] if earlier else f"{ARCHIVE_PREFIX}{row['name']}-{stamp}-folder"
+            if not earlier:
+                gitops.git(["branch", other, head], root)
             saved.append(other)
     ahead, _ = unlanded(ctx, row)
     branch_ahead = gitops.commits_not_in(root, [gitops.rev(root, f"refs/heads/{row['branch']}")], [main])

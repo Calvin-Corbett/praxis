@@ -23,17 +23,16 @@ def init(start: Path | str | None = None, check: str | None = None, commit: bool
     root = repo.root
     toml = root / config.FILE_NAME
     ignored = {name for name in (config.FILE_NAME, *instructions.FILES) if gitops.is_ignored(root, name)}
+    state = {name: _uncommitted(root, name) for name in instructions.FILES if name not in ignored}
+    yours = [name for name, s in state.items() if s == "new"]  # your own file, never committed: never commit it
     if commit:  # never commit someone's own unsaved edits along with the setup files
-        busy = [(name, _uncommitted(root, name)) for name in instructions.FILES if name not in ignored]
-        busy = [(name, state) for name, state in busy if state]
+        busy = [name for name, s in state.items() if s == "changed"]
         if busy:
-            lines = "\n".join(f"  - {name} ({'not in git yet' if state == 'new' else 'has unsaved changes'})"
-                              for name, state in busy)
             raise PraxisError(
-                "Praxis adds its rules to AGENTS.md and CLAUDE.md and commits them. These have changes that are not "
-                f"committed yet, and committing would include them:\n{lines}\n"
-                "Commit (or undo) your changes to them first, then run `praxis init` again. Nothing was changed. "
-                "(Or run `praxis init --no-commit` and commit the files yourself.)"
+                "Praxis adds its rules to AGENTS.md and CLAUDE.md and commits them. These have changes you have not "
+                "committed yet, and committing would include them: " + ", ".join(busy) + ".\n"
+                "Commit your changes to them first (or put them back the way they were), then run `praxis init` "
+                "again. Nothing was changed. (Or run `praxis init --no-commit` and commit the files yourself.)"
             )
     if toml.is_file():
         cfg = config.load(root)
@@ -61,7 +60,13 @@ def init(start: Path | str | None = None, check: str | None = None, commit: bool
         say("WARNING: both AGENTS.md and CLAUDE.md are ignored by git, so agents will not see the Praxis rules. "
             "Remove them from .gitignore and run `praxis init` again.")
     if commit:
-        _commit_setup(root, cfg, say, ignored)
+        _commit_setup(root, cfg, say, ignored | set(yours))
+        if yours:
+            say("")
+            say(f"{' and '.join(yours)} {'was' if len(yours) == 1 else 'were'} already here but not in git, so Praxis "
+                "added its rules without committing your file. Agent folders only get it once it is committed:")
+            say(f"  git add {' '.join(yours)}")
+            say('  git commit -m "Agent rules"')
     say("")
     say("Next: start each agent with its own name, task and files, for example:")
     say('  praxis start claude-1 "make the player jump higher" scripts/player.gd')

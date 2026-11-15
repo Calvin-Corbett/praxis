@@ -68,9 +68,10 @@ Praxis looks at the folder, recognises Unity, Unreal, Godot or a web game, and w
   game still works. Praxis guesses one when it can. If it leaves it empty, ask an agent:
   *"Set the check line in praxis.toml to a command that builds or tests this project."*
 - A section in `AGENTS.md` and `CLAUDE.md` that tells every agent the rules. Anything already in those
-  files is kept, line endings included. If you have changed either file and not committed the change yet,
-  Praxis stops and asks you to commit it first, so it never commits your own unfinished notes. A file your
-  project tells git to ignore is left alone.
+  files is kept, line endings included. Praxis never commits your own unfinished notes: if one of those
+  files has changes you have not committed, it stops and asks you to commit them first. If one is yours and
+  was never committed (Claude Code's `/init` leaves one like that), Praxis adds its rules to it and prints
+  the one command to commit it. A file your project tells git to ignore is left alone.
 
 **2. Start two agents.** Each one gets a name, a task and the files it will touch:
 
@@ -97,9 +98,10 @@ If two agents finish at once, the second simply waits its turn.
 
 **5. Finish.** When a task is done and landed, the agent (or you) runs `praxis done <name>`. That frees its
 files and removes its folder. Praxis refuses if anything has not landed yet, so nothing is lost. Files in the
-folder that git ignores are not thrown away either: caches your tools rebuild by themselves (like `.godot/`,
-`Library/` or `node_modules/`) are removed, and everything else is moved to `.git/praxis/kept/`, and Praxis
-says so.
+folder that git ignores are not thrown away either. Only caches that rebuild by themselves are removed: the
+engine's own cache folders at the top of the agent's folder (Godot `.godot/`, Unity `Library/`, `Temp/` and
+`obj/`, Unreal `Intermediate/` and `DerivedDataCache/`) and any `node_modules/` or `__pycache__/`.
+Everything else is moved to `.git/praxis/kept/`, and Praxis says so.
 
 ---
 
@@ -177,7 +179,14 @@ changes, then land again. Tip: let only agents change files, each in its own fol
 **"files changed while the check ran"**
 The agent's folder changed during the check, so the check may not have tested what would land, and nothing
 landed. Usually an agent kept editing during a landing: land again once it stops. If your check itself
-rewrites some files every time it runs, commit those files once or add them to `.gitignore`.
+rewrites some files every time it runs (some Unity and Godot builds do), list them in praxis.toml, for
+example `check_may_change = ["ProjectSettings/*.asset"]`. Praxis then puts those files back the way they were
+committed after each check, and lands. The message names the files and gives the exact line.
+
+**"submodules ... have commits that exist nowhere else"**
+An agent made a commit inside a submodule (an addon or plugin kept in its own git project) and never pushed
+it. Removing the folder would lose it, so Praxis stops. Push it from inside that submodule, then run the same
+command again.
 
 **"... is not on any branch (a 'detached HEAD')" or "is on the branch ..., but its work must be on praxis/..."**
 The agent switched branches in its folder. Praxis will not land or remove that folder until its work is back

@@ -178,11 +178,19 @@ def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | No
         return ("A new commit was made in the folder while the check ran, so the check did not test what would "
                 "land. Nothing landed. Land again (and do not change the folder while a landing runs).")
     tracked = gitops.dirty_files(folder, untracked=False)
+    allowed = [p for p in tracked if paths.is_asset(p, ctx.cfg.check_may_change)]
+    if allowed:  # the check rewrites these by itself; the commit being landed is the one that was checked
+        gitops.git(["restore", "--worktree", "--source=HEAD", "--", *allowed], folder)
+        ctx.say("Put back files the check rewrote (check_may_change in praxis.toml): " + ", ".join(allowed[:8])
+                + (f" and {len(allowed) - 8} more" if len(allowed) > 8 else ""))
+        tracked = [p for p in tracked if p not in allowed]
     if tracked:
         return ("These files changed while the check ran, so the check may not have tested what would land:\n"
                 + "\n".join(f"  - {p}" for p in tracked[:20])
-                + "\nNothing landed. If an agent edited them, land again once it stops. If the check itself rewrites "
-                "them every time, commit them once or add them to .gitignore, then land again.")
+                + "\nNothing landed. If an agent edited them, land again once it stops (and do not change the folder "
+                "while a landing runs).\nIf the check itself rewrites them every time it runs, add them to "
+                'check_may_change in praxis.toml (for example check_may_change = ["' + tracked[0] + '"]), then land '
+                "again.")
     new = gitops.dirty_files(folder)
     if new:
         ctx.say("Note: the check created new files that git does not ignore. They were not landed: "
