@@ -30,7 +30,8 @@ def git(args: list[str], cwd: Path | str, check: bool = True, stdin: str | None 
             stdin=None if stdin is not None else subprocess.DEVNULL,  # git never waits for a keyboard
         )
     except FileNotFoundError as exc:
-        raise PraxisError("Praxis needs git, and git is not installed (or not on the PATH).") from exc
+        raise PraxisError("Praxis needs git, and git is not installed (or not on the PATH). Install it from "
+                          "https://git-scm.com/downloads, then open a new terminal and try again.") from exc
     if check and proc.returncode != 0:
         raise GitError(args, proc)
     return proc
@@ -54,14 +55,23 @@ class Repo:
         return self.root.name
 
 
+class NotAGitProject(PraxisError):
+    """The folder is in no git project at all (as opposed to one git cannot use)."""
+
+
 def find_repo(start: Path | str | None = None) -> Repo:
     here = Path(start or os.getcwd())
+    if not here.is_dir():
+        raise PraxisError(f"{here} is not a folder that exists.")
     proc = git(["rev-parse", "--git-common-dir"], here, check=False)
     if proc.returncode != 0:
-        raise PraxisError(
-            f"{here} is not inside a git project. Open your project folder first "
-            "(if it has never used git, run `git init` there)."
-        )
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if "not a git repository" in detail.lower():
+            raise NotAGitProject(
+                f"{here} is not inside a git project. Open your project folder first. If the project has never "
+                "used git, run `praxis init` in its folder: Praxis sets git up for it, without changing your files."
+            )
+        raise PraxisError(f"git cannot use the project at {here}:\n{detail}")
     common = Path(proc.stdout.strip())
     if not common.is_absolute():
         common = (here / common)

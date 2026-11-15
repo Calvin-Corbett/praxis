@@ -6,7 +6,9 @@ You tell Claude Code, Codex, Cursor or any other AI coding agent what to build. 
 agent. With two or three at once, things go wrong: one agent overwrites another's change, a level file gets
 edited by two agents and ends up broken, and something that worked yesterday stops working.
 
-Praxis is a small helper that sits between your agents and your project. It does five things:
+Praxis is the coordination layer for AI agents. It runs no AI model of its own, and it is not a harness: it has
+no tools, skills or prompts. It sits above the agents you already use (Claude Code, Codex, Cursor...) and keeps
+them from breaking each other's work. It does five things:
 
 1. **Each agent gets its own copy of the project to work in**, so they never type over each other.
 2. **Each agent says which files it will change ("claims" them) before it starts.** If another agent
@@ -58,11 +60,11 @@ The package is called `agent-praxis`; the command is `praxis`.
 
 ## Five-minute walkthrough with two agents
 
-Your game lives in a folder that uses git (if it does not yet: open a terminal in the folder and run
-`git init`, then `git add -A` and `git commit -m "first version"`). Commit everything you want agents to see
-before you start: each agent's folder is made from what is committed, so a file you never committed is not in
-it. `praxis init` warns you if it finds any. A `.gitignore` that leaves out the engine's caches (Unity
-`Library/`, Godot `.godot/`, `node_modules/`...) keeps those out of the main version too.
+Praxis builds on git. If your game folder does not use git yet, `praxis init` sets it up for you (see
+[Your game is not in git yet](#your-game-is-not-in-git-yet)). If it already uses git, commit everything you want
+agents to see before you start: each agent's folder is made from what is committed, so a file you never
+committed is not in it. `praxis init` warns you if it finds any. A `.gitignore` that leaves out the engine's
+caches (Unity `Library/`, Godot `.godot/`, `node_modules/`...) keeps those out of the main version too.
 
 **1. Set the project up (once).** Open a terminal in your game folder and run:
 
@@ -123,6 +125,33 @@ what it points to is never touched.
 
 **6. Put the work on GitHub (if you use it).** Praxis never pushes. Landed work is in your main folder's
 branch; push it from there as usual (`git push`) whenever you like.
+
+---
+
+## Your game is not in git yet
+
+Just run `praxis init` in the game's folder. When the folder is not part of any git project, Praxis sets git up
+first, and it never changes, moves or deletes any of your files. It only adds:
+
+- the `.git` folder, where git keeps its copies;
+- a `.gitignore`, only if there is none, that leaves out what the engine rebuilds by itself (Unity `Library/`,
+  `Temp/`, `Builds/`...; Unreal `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`; Godot `.godot/`;
+  `node_modules/` and `dist/`) and clutter such as `Thumbs.db`, `.DS_Store` and `*.log`. If you write your own
+  `.gitignore` first, Praxis keeps it exactly as it is;
+- with [Git LFS](https://git-lfs.com) installed, a `.gitattributes` (only if there is none) that keeps big
+  binary files (pictures, sound, models, video, `.uasset`, archives) in LFS. Without LFS they go into plain git:
+  Praxis says so and lists any file over 50 MB that would be saved.
+
+Line endings are kept exactly as they are: the new git project is set never to convert CRLF or LF, even where
+Git for Windows would normally do so. Then Praxis saves all the files as the first commit ("Project files, set
+up by Praxis") and carries on with the normal setup. It prints what it created, how many files it saved and
+their size, what git leaves out, and the biggest files saved. Check that list (`git status --ignored` shows what
+is left out) before agents start. A big folder (thousands of files, gigabytes) can take several minutes; leave
+the window open. A backup copy of the folder is wise the first time. If anything goes wrong before the first
+commit, Praxis takes away what it added, so the folder is as it was.
+
+Praxis does not do this for a folder inside another git project (it stops and explains), for your home folder
+or a whole drive, or for a folder that is part of a bigger game folder (it names the folder to run it in).
 
 ---
 

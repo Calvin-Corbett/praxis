@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_praxis import config, gitops, instructions
+from agent_praxis import config, gitops, instructions, newgit
 from agent_praxis.config import Config
 from agent_praxis.errors import PraxisError
 
@@ -20,7 +20,11 @@ def _uncommitted(root: Path, name: str) -> str | None:
 
 def init(start: Path | str | None = None, check: str | None = None, commit: bool = True, say=print) -> Config:
     here = Path(start or Path.cwd()).resolve()
-    repo = gitops.find_repo(here)
+    try:
+        repo = gitops.find_repo(here)
+    except gitops.NotAGitProject:  # never used git: set it up (only init does this, and only here)
+        newgit.create(here, commit=commit, say=say)
+        repo = gitops.find_repo(here)
     root = repo.root
     toml = root / config.FILE_NAME
     if not gitops.same_path(here, root) and not toml.is_file():
