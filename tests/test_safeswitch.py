@@ -24,6 +24,8 @@ from agent_praxis.landing_queue import PROTOCOL, Ticket, read_note, ticket_proto
 from agent_praxis.store import Store
 
 BEHIND = store.FORMAT - 1  # the format of "the Praxis before this one"
+# The tables the newest format brings: what the database of the Praxis before this one does not have.
+NEWEST = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", store.UPGRADES[store.FORMAT]))
 
 
 def state(project: Path) -> Path:
@@ -190,7 +192,7 @@ def test_a_registered_older_command_keeps_the_database_as_it_is(alice):
         assert code == 0, out
         assert "OLDER PRAXIS COMMANDS ARE STILL RUNNING" in out and "praxis land ghost (pid 4242, Praxis 0.3.0)" in out
         assert "alice" in out, "status still answers from the database as it is"
-        assert db_format(alice) == BEHIND and "checkcache" not in tables(alice)
+        assert db_format(alice) == BEHIND and not NEWEST & tables(alice)
 
         code, out = praxis("land", "alice")
         assert code == 1, out
@@ -203,7 +205,7 @@ def test_a_registered_older_command_keeps_the_database_as_it_is(alice):
         let_go(ghost)
     code, out = praxis("status")  # the older command has finished: this Praxis takes over
     assert code == 0 and "OLDER PRAXIS" not in out, out
-    assert db_format(alice) == store.FORMAT and "checkcache" in tables(alice)
+    assert db_format(alice) == store.FORMAT and tables(alice) >= NEWEST
 
 
 def test_an_older_landing_waiting_in_line_keeps_the_database_as_it_is(alice):
@@ -244,7 +246,7 @@ def test_upgrade_now_takes_over_anyway(alice, args):
         code, out = praxis(*args)
         assert code == 0, out
         assert "Took this project over (--upgrade-now)" in out and "praxis land ghost" in out
-        assert db_format(alice) == store.FORMAT and "checkcache" in tables(alice)
+        assert db_format(alice) == store.FORMAT and tables(alice) >= NEWEST
     finally:
         let_go(ghost)
 
