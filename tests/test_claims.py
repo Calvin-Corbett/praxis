@@ -16,11 +16,11 @@ def test_start_makes_folder_branch_and_claim(project):
     assert "alice (working)" in out and "scripts/player.gd" in out
 
 
-def test_overlapping_claims_are_refused_naming_the_holder(project):
-    assert praxis("start", "alice", "rework the scripts", "scripts")[0] == 0
-    code, out = praxis("start", "bob", "speed up enemies", "scripts/enemy.gd")
+def test_overlapping_asset_claims_are_refused_naming_the_holder(project):
+    assert praxis("start", "alice", "rework the levels", "scenes")[0] == 0
+    code, out = praxis("start", "bob", "move a wall", "scenes/level1.tscn")
     assert code == 1
-    assert "alice holds" in out and "scripts" in out and "rework the scripts" in out
+    assert "alice holds" in out and "scenes" in out and "rework the levels" in out
     assert "praxis done alice" in out
     assert not folder(project, "bob").exists(), "a refused start must not leave a folder behind"
     code, out = praxis("status")
@@ -30,8 +30,8 @@ def test_overlapping_claims_are_refused_naming_the_holder(project):
 def test_non_overlapping_claims_work_and_widening_is_checked(project):
     assert praxis("start", "alice", "jump", "scripts/player.gd")[0] == 0
     assert praxis("start", "bob", "enemies", "scripts/enemy.gd")[0] == 0
-    code, out = praxis("claim", "bob", "scripts/player.gd")
-    assert code == 1 and "alice holds" in out
+    code, out = praxis("claim", "bob", "scripts/player.gd")  # a code file: shared, and bob is told so
+    assert code == 0 and "also being edited by alice" in out, out
     code, out = praxis("claim", "bob", "art")
     assert code == 0 and "art" in out
     code, out = praxis("claim", "alice", "art/hero.png")

@@ -55,20 +55,20 @@ def _age(project, agent, hours):
 
 
 def test_stale_claims_are_shown_and_released_on_request_only(project):
-    praxis("start", "alice", "jump", "scripts/player.gd")
+    praxis("start", "alice", "jump", "scripts/player.gd", "scenes/level1.tscn")
     praxis("start", "bob", "enemies", "scripts/enemy.gd")
     _age(project, "alice", 30)
     code, out = praxis("status")
     assert "alice has shown no sign of work for 30 hours" in out
     assert "praxis release-stale alice" in out
     assert "bob has shown" not in out
-    code, out = praxis("start", "carol", "jump", "scripts/player.gd")
+    code, out = praxis("start", "carol", "jump", "scenes/level1.tscn")
     assert code == 1, "stale claims still protect files until released"
     code, out = praxis("release-stale")
-    assert code == 0 and "Released alice's claims (scripts/player.gd)" in out
+    assert code == 0 and "Released alice's claims (scenes/level1.tscn, scripts/player.gd)" in out
     assert "bob" not in out.split("Released")[1].split("\n")[0]
     assert folder(project, "alice").is_dir(), "the folder and its work are kept"
-    assert praxis("start", "carol", "jump", "scripts/player.gd")[0] == 0
+    assert praxis("start", "carol", "jump", "scenes/level1.tscn")[0] == 0
     assert "its claims were released" in praxis("status")[1]
 
 

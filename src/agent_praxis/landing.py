@@ -188,7 +188,18 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
                 return problem
             # What landing would really change in main, now that the work sits on top of it. This is the one
             # that counts: it also catches an agent putting a file back to an older version.
-            clashes = _held_by_others(ctx, row, gitops.changed_between(folder, base, "HEAD"), note=True)
+            landing_changes = gitops.changed_between(folder, base, "HEAD")
+            clashes = _held_by_others(ctx, row, landing_changes, note=True)
+            undone = [] if clashes or ctx.cfg.exclusive_code else _undoes_landed_work(ctx, row, folder, base,
+                                                                                       landing_changes)
+            if undone:
+                return _fail(ctx, row, "undo", "it would undo work that landed after it started",
+                             "Landing this would put these files back to an older version, undoing newer work "
+                             "in main:\n" + "\n".join(undone)
+                             + "\nTake the newest main version of each: in your folder run\n"
+                             f"  git checkout {main} -- <file>\n"
+                             "then make your own change to it again, and land again. If the older version is "
+                             "really wanted, ask the human.")
         if clashes:
             return _fail(ctx, row, "claims", "it changed files another agent holds",
                          "These files are held by another agent, so this work cannot land:\n" + "\n".join(clashes)
@@ -252,6 +263,51 @@ def _needs_the_human(ctx: Ctx, row, output: str, log: str) -> bool:
                  log=log, sig_text=output)
 
 
+UNDO_LOOKBACK = 30  # how many of a file's older versions in main are compared with what would land
+
+
+def _undoes_landed_work(ctx: Ctx, row, folder: Path, base: str, changed: list[str]) -> list[str]:
+    """Shared code files this landing would put back exactly to an older main version, throwing away what other
+    landings changed in them since (an agent that rewrote a file from an old copy). One line per file."""
+    landed = ctx.store.rows("SELECT agent, commit_id FROM landings WHERE ok = 1 AND commit_id IS NOT NULL "
+                            "ORDER BY id DESC LIMIT 50")
+    lines = []
+    for path in changed[:200]:
+        if paths.is_asset(path, ctx.cfg.assets):
+            continue  # asset files are one agent at a time: the claims check covers them
+        new = gitops.git(["rev-parse", "--verify", "--quiet", f"HEAD:{path}"], folder, check=False).stdout.strip()
+        if not new:
+            continue  # deleted: not a step back to an older version
+        versions = _versions_in_main(folder, base, path)  # [(commit, blob)], newest first
+        older = [i for i, (_c, blob) in enumerate(versions) if blob == new]
+        if not older or older[0] == 0:
+            continue
+        newer_commit = versions[0][0]  # the newest change to it in main, which landing would throw away
+        agent = _landing_holding(folder, newer_commit, landed)
+        if agent == row["name"]:
+            continue  # its own earlier landing: taking that back is its own business
+        whose = f"{agent}'s landing" if agent else "newer work in main"
+        lines.append(f"  - {path} (undoing {whose})")
+    return lines
+
+
+def _versions_in_main(folder: Path, base: str, path: str) -> list[tuple[str, str]]:
+    """(commit, the file's content id after it) for the newest UNDO_LOOKBACK commits in main that changed *path*."""
+    raw = gitops.git(["log", f"-n{UNDO_LOOKBACK}", "--no-renames", "--no-abbrev", "--raw", "--format=%x01%H", base,
+                      "--", path], folder, check=False).stdout
+    found = []
+    for chunk in raw.split("\x01")[1:]:
+        lines = chunk.strip().splitlines()
+        if not lines:
+            continue
+        for line in lines[1:]:
+            fields = line.split("\t", 1)[0].split()
+            if line.startswith(":") and len(fields) >= 4:
+                found.append((lines[0].strip(), fields[3]))
+                break
+    return found
+
+
 def _held_by_others(ctx: Ctx, row, changed: list[str], note: bool = False) -> list[str]:
     """Changed files another agent holds one at a time: asset files, or every file with exclusive_code on. Code
     files are shared, so another agent working on one never stops a landing; only a real clash does."""
@@ -280,7 +336,7 @@ def _integrate(ctx: Ctx, row, folder: Path):
         args = [*gitops.identity_args(folder), "rebase", "-q", f"refs/heads/{main}"]
     before = gitops.rev(folder, "HEAD")
     fork = gitops.git(["merge-base", "HEAD", f"refs/heads/{main}"], folder, check=False).stdout.strip()
-    proc = gitops.git(args, folder, check=False)
+    proc = _past_generated_clashes(ctx, folder, gitops.git(args, folder, check=False))
     if proc.returncode == 0:
         return None
     clashing = gitops.conflicted_files(folder)
@@ -313,13 +369,36 @@ def _integrate(ctx: Ctx, row, folder: Path):
                  problems=len(clashing), sig_text="\n".join(sorted(clashing)))
 
 
+def _past_generated_clashes(ctx: Ctx, folder: Path, proc):
+    """A rebase that stopped only on generated files: take main's version of each (Praxis rebuilds them after the
+    landing anyway, from the sources) and carry on. Returns the last git step's result."""
+    taken: list[str] = []
+    while proc.returncode != 0 and ctx.cfg.generated and gitops.operation_in_progress(folder) == "rebase":
+        clashing = gitops.conflicted_files(folder)
+        if not clashing or not all(generated.entry_for(ctx.cfg, p) for p in clashing):
+            break
+        # In a rebase, "ours" is the newest main version the agent's commits are being put on.
+        if gitops.git(["checkout", "--ours", "--", *clashing], folder, check=False).returncode != 0:
+            break
+        gitops.git(["add", "--", *clashing], folder)
+        taken += [p for p in clashing if p not in taken]
+        empty = gitops.git(["diff", "--cached", "--quiet"], folder, check=False).returncode == 0
+        proc = gitops.git([*gitops.identity_args(folder), "rebase", "--skip" if empty else "--continue"], folder,
+                          check=False)
+    if taken and proc.returncode == 0:
+        ctx.say("Took the newest main version of the generated file(s) " + ", ".join(taken) + ": Praxis rebuilds "
+                "them from their sources after this landing.")
+    return proc
+
+
 def _put_folder_back(row, folder: Path, before: str | None) -> str | None:
     """After a refused rebase or merge: the folder must be on the agent's own branch, with no half-done git step,
-    holding exactly the commit it held before. None when it is; else what is wrong, in plain words."""
+    holding the same files it held before (the same commit, or the original commits an earlier joined try that
+    was cut short had put aside). None when it is; else what is wrong, in plain words."""
     _back_on_branch(row, folder)
     head = gitops.rev(folder, "HEAD")
-    if (gitops.operation_in_progress(folder) is None and gitops.current_branch(folder) == row["branch"]
-            and head == before):
+    same = head == before or (head is not None and before is not None and _tree(folder, head) == _tree(folder, before))
+    if gitops.operation_in_progress(folder) is None and gitops.current_branch(folder) == row["branch"] and same:
         return None
     return (f"git could not combine your work with the newest main version, and then Praxis could not put "
             f"{row['name']}'s folder back exactly as it was. Your saved work is still in git (commit "
@@ -389,7 +468,8 @@ def _rebase_as_one(ctx: Ctx, row, folder: Path) -> list[str] | None:
     if gitops.git(["update-ref", keep, original], folder, check=False).returncode != 0:
         return []
     gitops.git(["reset", "-q", "--soft", joined.stdout.strip()], folder)  # the same files as now
-    proc = gitops.git([*gitops.identity_args(folder), "rebase", "-q", main_ref], folder, check=False)
+    proc = _past_generated_clashes(
+        ctx, folder, gitops.git([*gitops.identity_args(folder), "rebase", "-q", main_ref], folder, check=False))
     if proc.returncode == 0:
         gitops.git(["update-ref", "-d", keep], folder, check=False)  # the joined work now holds them
         ctx.say("Put your saved changes together into one commit, so they fit on top of the newest version.")
@@ -630,10 +710,10 @@ def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | No
 def _put_back_check_rewrites(ctx: Ctx, row, folder: Path) -> None:
     """Put the files the check is allowed to rewrite (check_may_change) back to their committed version. A copy
     of each changed one is kept first, in case an agent had edited it during the check."""
-    if not ctx.cfg.check_may_change:
+    allowed = ctx.cfg.check_may_change + [g["path"] for g in ctx.cfg.generated]  # Praxis rebuilds those itself
+    if not allowed:
         return
-    changed = [p for p in gitops.dirty_files(folder, untracked=False)
-               if paths.matches_from_top(p, ctx.cfg.check_may_change)]
+    changed = [p for p in gitops.dirty_files(folder, untracked=False) if paths.matches_from_top(p, allowed)]
     if not changed:
         return
     dest = paths.fresh_folder(ctx.store.dir / "kept" / f"{row['name']}-{time.strftime('%Y%m%d-%H%M%S')}-check")
