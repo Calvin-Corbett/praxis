@@ -41,7 +41,8 @@ def test_status_asks_git_a_few_questions_per_agent(project, monkeypatch, count):
     assert code == 0, out
     # Finding the project (2), every branch tip at once (1), then per agent: its folder and commit (1), its
     # changed files (1) and its unlanded commits (1).
-    assert len(calls) <= 3 + 3 * count, "\n".join(" ".join(a) for a, _ in calls)
+    # Plus two for the author check: the main branch's recent authors, and the identity the agent folders use.
+    assert len(calls) <= 5 + 3 * count, "\n".join(" ".join(a) for a, _ in calls)
     statuses = [args for args, _ in calls if "status" in args]
     assert len(statuses) == count and all(args[0] == "--no-optional-locks" for args in statuses), statuses
     assert "1 file(s) being edited" in out and "1 saved change(s) not landed yet" in out, out

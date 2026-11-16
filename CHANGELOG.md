@@ -10,6 +10,17 @@
   frees its place. `praxis status` now lists the running and waiting heavy jobs with the agent and how long ago each
   started or joined. The agent rules gain one line: whole-suite tests and browser runs go through
   `praxis run --heavy`.
+- **One stable launcher for every version.** Each Praxis version installs into its own folder, so a path you gave your
+  agents stopped working after an update. Run `praxis launcher` once and you get `~/.praxis/bin/praxis` (and
+  `praxis.cmd` on Windows) that always runs the newest Praxis you have installed. Use that path in your agents'
+  instructions. Run `praxis launcher` again after installing a new version. The launcher only picks which Praxis to
+  run: an older Praxis still refuses a project a newer one has used, so versions never mix.
+- **`after_done`** in `praxis.toml`: a command run in the main folder after `praxis done` finishes an agent (also after
+  `praxis land --done`). Praxis sets `PRAXIS_AGENT` and `PRAXIS_TASK` for it. If it fails you get a warning, and the
+  agent stays done.
+- **A warning when your agents would commit as the wrong person.** If the git name and email an agent folder would
+  commit with match none of the authors of the main branch's latest commits, `praxis start` and `praxis status` say so,
+  naming both, and print the two `git config` lines that set the project's identity.
 
 ### Changed
 - The project database is now format 3 (a new table for the heavy jobs). Praxis upgrades it by itself the first time

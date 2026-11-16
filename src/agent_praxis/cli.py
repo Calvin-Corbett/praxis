@@ -33,6 +33,7 @@ When things go wrong:
   praxis release-stale [agent...] [--force]     free the files of agents that went quiet
   praxis unclaim <agent> <files...>             let go of files
   praxis setup <agent>                          run praxis.toml's setup command in the agent's folder again
+  praxis launcher                               (re)write the stable per-user launcher that runs the newest Praxis
 
 Exit codes: 0 done, 1 refused (the message says why; nothing was changed), 2 not landed or a step failed (the
 message says why; work is kept), 3 Praxis hit a problem it did not expect, 130 stopped with Ctrl+C.
@@ -78,6 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("job", nargs=argparse.REMAINDER, metavar="command", help="the command to run")
 
     sub.add_parser("status", help="show who is doing what")
+    sub.add_parser("launcher", help="write the launcher at ~/.praxis/bin that always runs the newest Praxis")
 
     for name, text in (("done", "finish an agent whose work has landed"),
                        ("abandon", "stop an agent, saving unlanded work"),
@@ -123,6 +125,10 @@ def run(argv: list[str]) -> int:
     if args.command == "init":
         from agent_praxis import setup
         setup.init(check=args.check, commit=not args.no_commit, say=_say)
+        return 0
+    if args.command == "launcher":
+        from agent_praxis import launcher
+        launcher.write_launcher(_say)
         return 0
     ctx, store = _ctx()
     try:

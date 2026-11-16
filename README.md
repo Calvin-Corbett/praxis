@@ -59,6 +59,13 @@ the folder to add. Until then, `python -m agent_praxis` works everywhere `praxis
 
 The package is called `agent-praxis`; the command is `praxis`.
 
+**One path that survives updates.** Each Praxis version installs into its own folder, so the path of `praxis` changes
+when you update. Run `praxis launcher` once: it writes `~/.praxis/bin/praxis` (and `praxis.cmd` on Windows; set
+`PRAXIS_HOME` to use another folder than `~/.praxis`). That launcher always runs the newest Praxis you have installed,
+so you can put its full path in your agents' instructions and leave it. Run `praxis launcher` again after you
+install a new version (an older version running it never makes the launcher older). The launcher only chooses which
+Praxis runs; an older Praxis still refuses a project that a newer one has used (see "Several versions of Praxis").
+
 ---
 
 ## Five-minute walkthrough with two agents
@@ -196,6 +203,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis resume <agent>` | You answered; the agent may carry on. |
 | `praxis release-stale [agent...]` | Free the files of agents that went quiet for a long time (`--force`: even one that may still be working). |
 | `praxis setup <agent>` | Run praxis.toml's `setup` command in the agent's folder again. |
+| `praxis launcher` | Write `~/.praxis/bin/praxis`, a launcher at a fixed path that runs the newest installed Praxis. |
 
 `praxis start` refuses a branch with the agent's name that Praxis did not make (it may be someone's work). Add
 `--reuse-branch` to carry on from it on purpose.
@@ -284,16 +292,25 @@ recorded, for example to rebuild or restart something. Praxis sets `PRAXIS_AGENT
 `PRAXIS_COMMIT` (the new main commit) for it. If it fails, Praxis prints a warning: the landing is done and
 stays done.
 
+**`after_done`**: a command run in the main folder after `praxis done` has finished an agent (also when
+`praxis land --done` does), for example to clean up something the agent started. Praxis sets `PRAXIS_AGENT` and
+`PRAXIS_TASK` for it. If it fails, Praxis prints a warning: the agent stays done.
+
 **`commit_trailers`**: lines added as git trailers to every commit Praxis writes itself (saving an agent's
 unsaved work when it lands, an abandoned agent's leftovers, and the joined commit when a landing joins an agent's
 commits into one). `{agent}` and `{task}` are filled in, for example `["Agent: {agent}", "Task: {task}"]`.
 Commits an agent makes itself are left as they are.
 
-**`env`**: extra environment variables for the check, `setup` and `after_land`, for example
+**`env`**: extra environment variables for the check, `setup`, `after_land` and `after_done`, for example
 `env = { TEMP = "D:/tmp", TMP = "D:/tmp" }`. Values are text.
 
 **Signed commits.** If the project signs its commits (`commit.gpgsign = true` in git's settings), the commits
 Praxis writes are signed too, with the key and program git is set up to use.
+
+**Who the commits are by.** An agent folder commits with the git name and email it finds. When those match none of the
+authors of the main branch's latest commits, `praxis start` and `praxis status` print a warning naming both
+identities and the two lines that set the project's (`git config user.name ...`, `git config user.email ...`, run in
+the main folder; they apply to every agent folder).
 
 **Git hooks.** Every git command Praxis runs inside an agent's folder (and the check) has `PRAXIS_AGENT` and
 `PRAXIS_TASK` set, so a project's git hooks can tell an agent's commit, and which agent, from a person's.

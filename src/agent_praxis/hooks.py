@@ -1,4 +1,4 @@
-"""The project's own commands around Praxis's steps: `setup` in a new agent folder, `after_land` in the main folder,
+"""The project's own commands around Praxis's steps: `setup` in a new agent folder, `after_land` and `after_done` in the main folder,
 and the `share` folders every agent folder links to instead of copying.
 
 None of them has a time limit (a deliberate rule, like the check). None reads the keyboard or opens a window, and
@@ -102,6 +102,26 @@ def run_after_land(ctx, row, commit: str) -> None:
         return
     ctx.say(f"Warning: the after_land command failed (exit code {code}). The landing itself is done and stays "
             f"done; only the command after it failed. The end of its output:\n{tail(log)}\nFull output: {log}")
+
+
+def run_after_done(ctx, row) -> None:
+    """Run praxis.toml's after_done command in the main folder. Its failure is only a warning: the agent is done
+    and stays done."""
+    command = ctx.cfg.after_done.strip()
+    if not command:
+        return
+    log = new_log(ctx.store.dir / "logs", f"{row['name']}-after-done")
+    env = command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
+    try:
+        code = run_logged(command, ctx.repo.root, env, log)
+    except OSError as exc:
+        ctx.say(f"Warning: the after_done command could not run ({exc}). {row['name']} is done and stays done.")
+        return
+    if code == 0:
+        ctx.say(f"Ran the after_done command: {command}")
+        return
+    ctx.say(f"Warning: the after_done command failed (exit code {code}). {row['name']} is done and stays done; "
+            f"only the command after it failed. The end of its output:\n{tail(log)}\nFull output: {log}")
 
 
 def share_problem(root: Path, rel: str) -> str | None:

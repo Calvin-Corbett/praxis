@@ -41,6 +41,7 @@ class Config:
     check_may_change: list[str] = field(default_factory=list)
     branch_prefix: str = "praxis/"
     after_land: str = ""
+    after_done: str = ""
     commit_trailers: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     setup: str = ""
@@ -167,12 +168,16 @@ share = [{", ".join(_q(p) for p in cfg.share)}]
 # PRAXIS_AGENT, PRAXIS_TASK and PRAXIS_COMMIT for it. If it fails, Praxis warns; the landing stays.
 after_land = {_q(cfg.after_land)}
 
+# A command run in the main folder after `praxis done` has finished an agent. Praxis sets PRAXIS_AGENT and
+# PRAXIS_TASK for it. If it fails, Praxis warns; the agent stays done.
+after_done = {_q(cfg.after_done)}
+
 # Lines added as git trailers to the commits Praxis writes itself (saving an agent's unsaved work, the
 # leftovers of an abandoned agent, joined commits), for example ["Agent: {{agent}}"]. {{agent}} and {{task}}
 # are filled in. Commits an agent makes itself are left as they are.
 commit_trailers = [{", ".join(_q(p) for p in cfg.commit_trailers)}]
 
-# Extra environment variables for the check, setup and after_land commands, for example
+# Extra environment variables for the check, setup, after_land and after_done commands, for example
 # env = {{ TEMP = "D:/tmp", TMP = "D:/tmp" }}
 env = {_inline_table(cfg.env)}
 """
@@ -394,8 +399,8 @@ def _clean(path: str) -> str:
 # Every setting Praxis reads, with the kind of value it must be.
 _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str,
-          "setup": str, "share": list, "after_land": str, "commit_trailers": list, "env": dict,
-          "exclusive_code": bool, "heavy_jobs": int, "generated": "tables"}
+          "setup": str, "share": list, "after_land": str, "after_done": str, "commit_trailers": list,
+          "env": dict, "exclusive_code": bool, "heavy_jobs": int, "generated": "tables"}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',

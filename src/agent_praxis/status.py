@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
-from agent_praxis import generated, paths
+from agent_praxis import generated, identity, paths
 from agent_praxis.agents import Ctx, agent_here, folder_state, look_at_agents, stale_agents
 from agent_praxis.landing_queue import ticket_alive
 
@@ -122,6 +123,11 @@ def render(ctx: Ctx) -> str:
         except Exception:  # noqa: BLE001 - a damaged folder must not hide the rest of the page
             out.append("      work: (could not read its folder)")
     out.append("")
+
+    # Agent folders share the project's git settings, so one folder answers for all (keeps status to few git calls).
+    sample = next((a["worktree"] for a in agents if Path(a["worktree"]).is_dir()), None)
+    for warning in identity.warnings(ctx, {a["name"]: sample for a in agents} if sample else {}):
+        out += warning.splitlines() + [""]
 
     out += _shared_files(cfg, claims)
     out += _generated_lines(ctx)

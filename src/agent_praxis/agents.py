@@ -475,6 +475,9 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str], reuse_branch: b
     ctx.say(f"(The main project folder, for `praxis done` at the end, is: {ctx.repo.root})")
     _say_claims(ctx, name, wanted, folder)
     _say_shared(ctx, shared)
+    from agent_praxis import identity
+    for line in identity.warnings(ctx, {name: folder}):
+        ctx.say(line)
     if not wanted:
         ctx.say(f"No files are claimed yet. Claim before editing: praxis claim {name} <files or folders>")
     waiting = gitops.dirty_files(ctx.repo.root)
@@ -1016,6 +1019,8 @@ def done(ctx: Ctx, name: str) -> None:
     gitops.git(["update-ref", "-d", f"{JOINING_PREFIX}{row['name']}"], ctx.repo.root, check=False)  # all landed
     _forget(ctx, row["name"])
     ctx.say(f"{row['name']} is done. Its claims and locks are released and its folder is removed.")
+    from agent_praxis import hooks
+    hooks.run_after_done(ctx, row)
 
 
 def abandon(ctx: Ctx, name: str) -> str | None:
