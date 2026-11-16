@@ -22,6 +22,7 @@ Everyday commands:
   praxis land <agent>                           test the agent's work and put it into the main version
   praxis land <agent> --background              the same, carrying on after this command returns
   praxis wait <agent>                           follow a background landing to its end
+  praxis run --heavy <command...>               run a heavy job (whole test suite, browser run) when a place is free
   praxis status                                 see who is doing what, and what needs you
   praxis done <agent>                           finish: release its files and remove its folder
 
@@ -71,6 +72,10 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("setup", help="run praxis.toml's setup command in an agent's folder again")
     s.add_argument("agent")
+
+    s = sub.add_parser("run", help="run a heavy job when fewer than heavy_jobs are running")
+    s.add_argument("--heavy", action="store_true", required=True, help="queue the command with the project's heavy jobs")
+    s.add_argument("job", nargs=argparse.REMAINDER, metavar="command", help="the command to run")
 
     sub.add_parser("status", help="show who is doing what")
 
@@ -136,6 +141,9 @@ def run(argv: list[str]) -> int:
             return background.wait(ctx, args.agent)
         elif cmd == "setup":
             return _setup(ctx, args.agent, again=True)
+        elif cmd == "run":
+            from agent_praxis import heavy
+            return heavy.run(ctx, args.job)
         elif cmd == "status":
             from agent_praxis import status
             sys.stdout.write(status.render(ctx))

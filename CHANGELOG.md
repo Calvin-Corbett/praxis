@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **A queue for heavy jobs.** Run a whole test suite or a browser run with `praxis run --heavy <command...>` and it
+  starts only when fewer than `heavy_jobs` (a new `praxis.toml` setting, default 2) heavy jobs are running on the
+  project; otherwise it tells you who is in front of it and waits its turn. You get the job's own exit code, no
+  window opens, and its output goes to a log under `.git/praxis/logs`. If a job's runner crashes, Praxis notices and
+  frees its place. `praxis status` now lists the running and waiting heavy jobs with the agent and how long ago each
+  started or joined. The agent rules gain one line: whole-suite tests and browser runs go through
+  `praxis run --heavy`.
+
+### Changed
+- The project database is now format 3 (a new table for the heavy jobs). Praxis upgrades it by itself the first time
+  it runs; an older Praxis then refuses the project instead of guessing.
+
 ## 0.4.0
 
 Praxis is the coordination layer for AI agents: it runs no model, and lets several agents (Claude Code, Codex, Cursor

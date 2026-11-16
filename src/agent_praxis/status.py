@@ -132,6 +132,8 @@ def render(ctx: Ctx) -> str:
         out.append(f"  - {c['path']}  held by {c['agent']} since {ago(c['since'], now)}")
     out.append("")
 
+    out += _heavy_lines(ctx, now)
+
     out.append("LANDING LINE" if line else "LANDING LINE: empty")
     for n, q in enumerate(line, 1):
         if not alive[q["id"]]:
@@ -155,6 +157,21 @@ def render(ctx: Ctx) -> str:
         out.append("")
         out.append("Note: no check command is set in praxis.toml, so landings are not tested.")
     return "\n".join(out).rstrip() + "\n"
+
+
+def _heavy_lines(ctx, now: float) -> list[str]:
+    from agent_praxis import heavy
+
+    jobs = heavy.rows(ctx.store)
+    if not jobs:
+        return []
+    out = [f"HEAVY JOBS (at most {ctx.cfg.heavy_jobs} run at once; `praxis run --heavy <command>`)"]
+    for j in jobs:
+        if j["started"]:
+            out.append(f"  - running: {j['agent']}, started {ago(j['started'], now)}: {j['command']}")
+        else:
+            out.append(f"  - waiting: {j['agent']}, joined {ago(j['enqueued'], now)}: {j['command']}")
+    return [*out, ""]
 
 
 def _shared_files(cfg, claims) -> list[str]:

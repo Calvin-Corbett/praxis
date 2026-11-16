@@ -46,6 +46,7 @@ class Config:
     setup: str = ""
     share: list[str] = field(default_factory=list)
     exclusive_code: bool = False
+    heavy_jobs: int = 2
     generated: list[dict] = field(default_factory=list)
 
     def with_trailers(self, message: str, agent: str, task: str) -> str:
@@ -129,6 +130,10 @@ assets = [
 # Code (text) files can be shared: several agents may claim and edit the same one, and Praxis refuses a
 # landing only when the edits really clash (the same lines). true makes code files one agent at a time too.
 exclusive_code = {"true" if cfg.exclusive_code else "false"}
+
+# How many heavy jobs (`praxis run --heavy <command>`: whole test suites, browser runs) may run at once on this
+# project, across all agents. The others wait in line.
+heavy_jobs = {cfg.heavy_jobs}
 
 # Files a command makes from other files. Nobody claims or edits them: after each landing that changes one
 # of the `from` files, Praxis runs the command in the main folder and commits the new file, for example
@@ -298,6 +303,8 @@ def load(root: Path) -> Config:
     for name, value in data.items():
         setattr(cfg, name, _typed(name, value))
     cfg.enough_after = max(2, cfg.enough_after)
+    if cfg.heavy_jobs < 1:
+        raise PraxisError("praxis.toml: heavy_jobs must be 1 or more.")
     if cfg.land_method not in ("rebase", "merge"):
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
     _check_branch_prefix(cfg.branch_prefix)
@@ -388,7 +395,7 @@ def _clean(path: str) -> str:
 _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str,
           "setup": str, "share": list, "after_land": str, "commit_trailers": list, "env": dict,
-          "exclusive_code": bool, "generated": "tables"}
+          "exclusive_code": bool, "heavy_jobs": int, "generated": "tables"}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',

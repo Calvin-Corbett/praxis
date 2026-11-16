@@ -188,6 +188,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis land <agent>` | Test the agent's work and add it to the main version. `--done` also finishes it. |
 | `praxis land <agent> --background` | The same, but returns as soon as the landing has its place in line. |
 | `praxis wait <agent>` | Follow a background landing to its end: its output, result and exit code. |
+| `praxis run --heavy <command...>` | Run a heavy job (a whole test suite, a browser run) only when fewer than `heavy_jobs` are running; otherwise wait in line. |
 | `praxis status` | One page: who is doing what, locks, the line, what needs you, recent landings. |
 | `praxis done <agent>` | Finish an agent whose work has landed. |
 | `praxis abandon <agent>` | Stop an agent. Unlanded work is saved on a branch named `praxis-saved/...`. |
@@ -213,6 +214,17 @@ command (or the tool's shell) that started it ends. Its output goes to the agent
 `praxis wait <agent>` waits (as long as it takes) until that landing ends, then prints its output and ends with
 the same exit code `praxis land` would have. Run it again as often as you like: it reports the same result.
 When no landing is running, it reports how the agent's last landing ended.
+
+### Heavy jobs
+
+Whole test suites and browser runs can swamp the machine when several agents start them at once. Run them with
+`praxis run --heavy <command...>` (for example `praxis run --heavy pytest`). Praxis starts the command only when
+fewer than `heavy_jobs` heavy jobs (`praxis.toml`, default 2) are already running for this project, whichever agent
+started them. Otherwise it says who is in front of it and waits its turn, first come first served, with no time
+limit. The job runs in your current folder with your environment (`PRAXIS_AGENT` and the rest), opens no window,
+and its output goes to a log in `.git/praxis/logs/`; `praxis run --heavy` ends with the job's own exit code.
+If a runner crashes or its terminal is closed, Praxis notices it is gone and frees its place. `praxis status` lists
+the running and waiting heavy jobs with the agent and how long ago each started or joined.
 
 ### Exit codes
 
@@ -249,6 +261,9 @@ the command in the main folder (with `env`, no keyboard, no window, no time limi
 turn in the line, and if the file changed commits it onto main as "Rebuild js/thermodata.js (after claude-1's
 landing)". If the command fails, the landing stays: `praxis status` shows the file as out of date with the log,
 and the next landing tries again. Praxis never overwrites unsaved changes to the file in the main folder.
+
+**`heavy_jobs`** (default `2`): how many `praxis run --heavy` jobs may run at once on this project (see
+"Heavy jobs" above). The rest wait in line. Must be 1 or more.
 
 **`branch_prefix`** (default `"praxis/"`): the start of every agent's branch name. It must be the start of a
 valid git branch name and end with `/`, for example `"agents/"`.
@@ -430,6 +445,7 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import
   copies of your project). Change this with `worktree_root` in praxis.toml.
 - Each agent works on its own git branch, `praxis/<name>` (`branch_prefix` in praxis.toml changes the start).
+- The heavy job queue is in the same database; each job's output goes to `.git/praxis/logs/<agent>-heavy-<time>.log`.
 - Background landings write to `.git/praxis/background/<agent>.log`; setup, after_land and check output go to
   `.git/praxis/logs/`.
 

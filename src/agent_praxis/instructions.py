@@ -61,6 +61,8 @@ only changes the text between the two praxis marker lines.)
 11. Stop only programs you started yourself, by their process number (PID). Never stop
    programs by name (for example `taskkill /IM chrome.exe`): that also closes the owner's
    own browser and other agents' programs.
+12. Run whole-suite tests and browser runs through `praxis run --heavy <command>`, so the machine is
+   never swamped: it waits in line when too many heavy jobs are running.
 
 Run `praxis status` at any time to see who is working on what."""
 
