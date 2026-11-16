@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import gitops
+from agent_praxis import gitops, shells
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW: a console program gets no window of its own
 TAIL_LINES = 20
@@ -36,13 +36,17 @@ def new_log(logs: Path, stem: str) -> Path:
     return log
 
 
-def run_logged(command: str, cwd: Path, env: dict[str, str], log: Path) -> int:
-    """Run *command* (as a shell line) in *cwd* until it ends, its output going to *log*. Returns its exit code."""
+def run_logged(command: str, cwd: Path, env: dict[str, str], log: Path, ctx=None) -> int:
+    """Run *command* (as a shell line) in *cwd* until it ends, its output going to *log*. Returns its exit code.
+    The log starts with the program that ran (see shells). With *ctx* the project's shell_fix setting decides
+    whether a bare `bash` is swapped on Windows, and a swap is said out loud; without it the swap is on and is
+    written in the log only."""
+    plan = shells.prepare(ctx, command, env, cwd) if ctx is not None else shells.plan(command, env, cwd)
     with open(log, "wb") as out:
-        out.write(f"$ {command}\n\n".encode())
+        out.write(plan.header(command))
         out.flush()
         try:
-            proc = subprocess.Popen(command, shell=True, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(plan.command, shell=True, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         except OSError as exc:
             out.write(f"Could not start it: {exc}\n".encode())
@@ -74,7 +78,7 @@ def run_setup(ctx, row) -> bool:
     log = new_log(ctx.store.dir / "logs", f"{name}-setup")
     ctx.say(f"Running the setup command in {name}'s folder: {command}")
     env = command_env(ctx.cfg, PRAXIS_AGENT=name, PRAXIS_TASK=row["task"])
-    code = run_logged(command, folder, env, log)
+    code = run_logged(command, folder, env, log, ctx)
     if code == 0:
         ctx.say(f"Setup finished. Its output: {log}")
         return True
@@ -93,7 +97,7 @@ def run_after_land(ctx, row, commit: str) -> None:
     log = new_log(ctx.store.dir / "logs", f"{row['name']}-after-land")
     env = command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"], PRAXIS_COMMIT=commit)
     try:
-        code = run_logged(command, ctx.repo.root, env, log)
+        code = run_logged(command, ctx.repo.root, env, log, ctx)
     except OSError as exc:
         ctx.say(f"Warning: the after_land command could not run ({exc}). The landing itself is done and stays done.")
         return
@@ -113,7 +117,7 @@ def run_after_done(ctx, row) -> None:
     log = new_log(ctx.store.dir / "logs", f"{row['name']}-after-done")
     env = command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
     try:
-        code = run_logged(command, ctx.repo.root, env, log)
+        code = run_logged(command, ctx.repo.root, env, log, ctx)
     except OSError as exc:
         ctx.say(f"Warning: the after_done command could not run ({exc}). {row['name']} is done and stays done.")
         return

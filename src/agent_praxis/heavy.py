@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from agent_praxis import agents, hooks, load
+from agent_praxis import agents, hooks, load, shells
 from agent_praxis.errors import PraxisError
 from agent_praxis.landing_queue import _try_lock, _unlock, held
 from agent_praxis.store import Store
@@ -143,12 +143,14 @@ def _execute(ctx, command: list[str], text: str, agent: str, mine: int | None, t
         env.setdefault("PRAXIS_AGENT", agent)
     log = hooks.new_log(ctx.store.dir / "logs", f"{agent.strip('()')}-heavy")
     ctx.say(f"Running the heavy job now: {text}\nIts output goes to {log}")
+    # One word is a shell line, several are started directly: either way the log names the program that runs.
+    plan = shells.prepare(ctx, command[0] if len(command) == 1 else command, env, os.getcwd())
     with open(log, "wb") as out:
-        out.write(f"$ {text}\n\n".encode())
+        out.write(plan.header(text))
         out.flush()
         try:
             proc = subprocess.Popen(
-                command[0] if len(command) == 1 else command,
+                plan.command,
                 shell=len(command) == 1,
                 cwd=os.getcwd(),
                 env=env,

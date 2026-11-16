@@ -46,6 +46,7 @@ class Config:
     after_done: str = ""
     commit_trailers: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    shell_fix: bool = True  # on Windows, a bare `bash` or `sh` starting a command runs Git Bash, not WSL
     setup: str = ""
     share: list[str] = field(default_factory=list)
     exclusive_code: bool = False
@@ -207,6 +208,11 @@ commit_trailers = [{", ".join(_q(p) for p in cfg.commit_trailers)}]
 # Extra environment variables for the check, setup, after_land and after_done commands, for example
 # env = {{ TEMP = "D:/tmp", TMP = "D:/tmp" }}
 env = {_inline_table(cfg.env)}
+
+# Windows only. A command above (or one given to `praxis run --heavy`) that starts with a bare `bash` or `sh`
+# would start WSL's bash (Linux inside Windows), which cannot see Windows paths. With true, Praxis starts
+# Git for Windows' bash instead when it finds one, and says so. false leaves the command exactly as written.
+shell_fix = {"true" if cfg.shell_fix else "false"}
 """
 
 
@@ -470,7 +476,7 @@ def _clean(path: str) -> str:
 
 # Every setting Praxis reads, with the kind of value it must be.
 _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
-          "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str,
+          "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str, "shell_fix": bool,
           "setup": str, "share": list, "after_land": str, "after_done": str, "commit_trailers": list,
           "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
           "generated": "tables", "checks": "tables"}

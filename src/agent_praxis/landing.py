@@ -23,7 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import checkcache, enough, generated, gitops, hooks, landing_batch, paths
+from agent_praxis import checkcache, enough, generated, gitops, hooks, landing_batch, paths, shells
 from agent_praxis.agents import (
     JOINING_PREFIX,
     PARALLEL_CHECKOUT,
@@ -621,13 +621,14 @@ def _run_check(ctx: Ctx, row, folder: Path, command: str) -> tuple[int, str, str
     logs = ctx.store.dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = _new_log(logs, row["name"])
+    plan = shells.prepare(ctx, command, env, folder)  # on Windows a bare `bash` means Git Bash, not WSL
     with open(log, "wb") as out:
-        out.write(f"$ {command}\n\n".encode())
+        out.write(plan.header(command))
         out.flush()
         # No time limit, on purpose. No keyboard either: a check that waits for a key (`pause`) would hold the
         # landing line forever. The output goes straight to the log, so a huge output never fills memory.
         guard = _CheckEndsWithMe()
-        proc = subprocess.Popen(command, shell=True, cwd=str(folder), env=env,
+        proc = subprocess.Popen(plan.command, shell=True, cwd=str(folder), env=env,
                                 stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
         try:
             guard.watch(proc)

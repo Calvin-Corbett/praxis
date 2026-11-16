@@ -354,6 +354,25 @@ Commits an agent makes itself are left as they are.
 **`env`**: extra environment variables for the check, `setup`, `after_land` and `after_done`, for example
 `env = { TEMP = "D:/tmp", TMP = "D:/tmp" }`. Values are text.
 
+**`shell_fix`** (default `true`, Windows only): what a bare `bash` or `sh` at the start of a command means.
+Windows keeps a `bash.exe` of its own in `C:\Windows\System32` that starts WSL (Linux inside Windows). WSL cannot
+see a Windows path such as `C:\game\tools\test.sh`, so `bash tools/test.sh` ends with exit code 127 ("No such file
+or directory") although the file is there. So when the check, `setup`, `after_land`, `after_done`, a `generated`
+command or a `praxis run --heavy` command starts with `bash` or `sh` written as the name alone, and Windows would
+start that launcher (or would find no such program), Praxis starts Git for Windows' own instead: `bin\bash.exe`
+(or `usr\bin\bash.exe`) in the Git folder, found from the `git` on your PATH and then in `Program Files\Git`. It
+prints one line naming both programs. `praxis run --heavy bash test.sh` needs this even when Git's bash comes
+first on your PATH, because a program started directly is looked for in System32 before the PATH. If you have no
+Git for Windows bash, the command runs as you wrote it and Praxis warns you that WSL's bash will run and cannot see
+Windows paths. A bash you name by its path, a bash of your own that Windows would find first, and every command on
+macOS and Linux are left alone. `shell_fix = false` leaves every command exactly as you wrote it.
+
+**The program that ran.** Every command log in `.git/praxis/logs/` (the check, `setup`, `after_land`,
+`after_done`, a `generated` rebuild, a heavy job) starts with the command as you wrote it, then a `Program:` line
+with the full path of the file that was started, and the shell that started it when the command is a shell line.
+When the first word is not a file Praxis can find beforehand (a shell's own command such as `cd`), the line says
+so and names the shell.
+
 **Signed commits.** If the project signs its commits (`commit.gpgsign = true` in git's settings), the commits
 Praxis writes are signed too, with the key and program git is set up to use.
 
@@ -408,6 +427,14 @@ it is made from instead.
 **"NOT landed: the check failed"**
 The agent's change broke the check. Praxis printed the end of the check's output and kept the agent's work.
 The agent should fix it and land again. The full output is saved; the message says where.
+
+**A `bash` command ends with exit code 127 on Windows, or says "No such file or directory" for a file that is there**
+The command started WSL's bash (`C:\Windows\System32\bash.exe`), which is Linux inside Windows and cannot see
+Windows paths. The `Program:` line at the top of the command's log names the program that ran. Praxis swaps a
+bare `bash` or `sh` at the start of a command for Git for Windows' bash by itself (see `shell_fix` above), so
+this is left only when you have no Git for Windows (install it), when `shell_fix = false` is set in praxis.toml,
+or when the `bash` is not the command's first word (inside a `.bat` file, or after `cd tools &&`): write the full
+path there, for example `"C:/Program Files/Git/bin/bash.exe" tools/test.sh`.
 
 **"the check reported a problem outside this agent's work"**
 The check ended with exit code 3: it found a problem the agent did not cause (a tool or service it needs is

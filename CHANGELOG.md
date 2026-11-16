@@ -52,6 +52,19 @@
   naming both, and print the two `git config` lines that set the project's identity.
 
 ### Changed
+- **On Windows, `bash` in your commands means Git Bash, not WSL.** A check, `setup`, `after_land`, `after_done` or
+  `generated` command, or a `praxis run --heavy` command, that started with a bare `bash` or `sh` ran
+  `C:\Windows\System32\bash.exe`. That is WSL (Linux inside Windows), which cannot see Windows paths: your script
+  "was not found", the command ended with exit code 127, and landings were refused through no fault of the work.
+  Praxis now starts Git for Windows' bash in its place when it finds one (next to the `git` on your PATH, or in
+  `Program Files\Git`) and prints one line naming both programs. If you have no Git for Windows bash, the command
+  runs as before and you get a warning that WSL's bash will run and cannot see Windows paths. A bash you name by its
+  path, or one of your own that Windows would find first, is left alone, and nothing changes on macOS or Linux. To
+  keep every command exactly as you wrote it, set the new `shell_fix = false` in `praxis.toml`.
+- **Every command log names the program that ran.** The log of a check, `setup`, `after_land`, `after_done`,
+  `generated` rebuild or heavy job now starts with the command as you wrote it and a `Program:` line with the full
+  path of the file that was started (and the shell that started it), so you can see which `bash`, `python` or `npm`
+  it really was.
 - **The launcher runs the install you ran it from.** When two installs had the same version, `praxis launcher` could
   write a launcher that ran the older install. Now, among equal versions, the install you ran `praxis launcher` from
   wins, then the one registered most recently. A lower version still always loses to a higher one.

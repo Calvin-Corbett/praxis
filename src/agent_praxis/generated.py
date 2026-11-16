@@ -99,7 +99,7 @@ def _rebuild(ctx, row, item: dict, where: Path | None) -> tuple[str | None, str 
     log = hooks.new_log(ctx.store.dir / "logs", f"{row['name']}-rebuild")
     env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
     try:
-        code = hooks.run_logged(item["command"], where, env, log)
+        code = hooks.run_logged(item["command"], where, env, log, ctx)
     except OSError as exc:
         return f"the command could not run ({exc})", str(log)
     if code != 0:
