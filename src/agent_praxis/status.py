@@ -89,7 +89,11 @@ def render(ctx: Ctx) -> str:
         try:
             look = looks[a["name"]]
             where = folder_state(ctx, a, look.is_worktree)
-            if where == "missing":
+            if where == "missing" and look.error is None and not look.ahead:
+                # Nothing unlanded: what `praxis done` cut short (or a folder removed by hand) leaves just this.
+                out.append(f"      its folder is gone and everything it saved has landed. Finish with: praxis done "
+                           f"{a['name']}")
+            elif where == "missing":
                 out.append(f"      PROBLEM: its folder is gone. To keep what it saved: praxis abandon {a['name']}")
             elif where == "partial":
                 out.append("      PROBLEM: its folder was only partly removed (Praxis's removal stopped part-way, "

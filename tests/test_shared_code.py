@@ -295,6 +295,34 @@ def test_release_stale_refuses_an_agent_that_may_still_be_working_unless_forced(
     assert edited.read_text() == "extends Node\n# half done\n", "the work is kept"
 
 
+def test_a_done_cut_short_after_the_folder_went_is_not_a_problem_and_done_again_finishes(project, monkeypatch):
+    from agent_praxis import agents
+
+    praxis("start", "engine", "physics", "scripts/player.gd")
+    edit(folder(project, "engine") / "scripts" / "player.gd", "extends Node\nvar speed = 5\n")
+    assert praxis("land", "engine")[0] == 0
+    real = agents._forget
+
+    def killed(*_a):
+        raise KeyboardInterrupt  # what a closed terminal does right after the folder was removed
+
+    monkeypatch.setattr(agents, "_forget", killed)
+    assert praxis("done", "engine")[0] == 130
+    monkeypatch.setattr(agents, "_forget", real)
+    assert not folder(project, "engine").exists()
+    out = praxis("status")[1]
+    assert "PROBLEM" not in out and "praxis abandon engine" not in out, out
+    assert "everything it saved has landed. Finish with: praxis done engine" in out, out
+    code, out = praxis("done", "engine")
+    assert code == 0, out
+    assert "WORKING NOW: nobody" in praxis("status")[1]
+
+
+def test_the_rules_say_to_stop_programs_only_by_their_own_pid():
+    from agent_praxis import instructions
+    assert "by their process number (PID)" in instructions.BODY and "taskkill /IM" in instructions.BODY
+
+
 # 5. Claim wording ------------------------------------------------------------------------------------------------
 
 def test_claiming_a_new_file_says_only_that_it_is_new_with_a_hint_only_for_a_likely_typo(project):

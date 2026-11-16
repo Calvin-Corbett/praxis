@@ -58,6 +58,9 @@ only changes the text between the two praxis marker lines.)
 10. Stay on the branch Praxis gave you (usually `praxis/<your-name>`): do not switch, create or delete
    branches. Never run `git push`, `git reset --hard`, `git clean`, or delete folders Praxis
    made. Praxis handles all of that.
+11. Stop only programs you started yourself, by their process number (PID). Never stop
+   programs by name (for example `taskkill /IM chrome.exe`): that also closes the owner's
+   own browser and other agents' programs.
 
 Run `praxis status` at any time to see who is working on what."""
 
