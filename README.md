@@ -11,13 +11,16 @@ no tools, skills or prompts. It sits above the agents you already use (Claude Co
 them from breaking each other's work. It does five things:
 
 1. **Each agent gets its own copy of the project to work in**, so they never type over each other.
-2. **Each agent says which files it will change ("claims" them) before it starts.** If another agent
-   already has those files, Praxis says no and names who has them.
+2. **Each agent says which files it will change ("claims" them) before it starts**, so everyone can see who
+   is working on what. Code (text) files can be shared: two agents may edit the same file at once, and Praxis
+   tells each one who else is working on it.
 3. **Files that cannot be combined** (scenes, levels, prefabs, 3D models, textures, sounds) are **locked**:
-   only one agent at a time may hold one.
+   only one agent at a time may hold one. Praxis says no to a second agent and names who has it.
 4. **Finished work goes through a line, one agent at a time.** Praxis puts the work on top of the newest
    version, runs your project's check (a build or test command), and only keeps the work if the check passes.
-   If it fails, the agent gets the error text and its work is kept.
+   If two agents changed the same lines of a shared file, the second to land is told which files clash and
+   whose landing they clash with, and fixes it. If anything fails, the agent gets the error text and its work
+   is kept.
 5. **When an agent keeps failing the same way, Praxis pauses it** and tells you, in plain words, what it needs.
 
 You never have to read code to use it. `praxis status` tells you what is going on.
@@ -180,7 +183,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 |---|---|
 | `praxis init` | Set the project up. Safe to run again. |
 | `praxis start <agent> "<task>" <files...>` | Give an agent its own folder and claim its files. |
-| `praxis claim <agent> <files...>` | Claim more files or folders. Asset files become locks. |
+| `praxis claim <agent> <files...>` | Claim more files or folders. Code files can be shared; asset files become locks. |
 | `praxis unclaim <agent> <files...>` | Let go of files. |
 | `praxis land <agent>` | Test the agent's work and add it to the main version. `--done` also finishes it. |
 | `praxis land <agent> --background` | The same, but returns as soon as the landing has its place in line. |
@@ -190,7 +193,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis abandon <agent>` | Stop an agent. Unlanded work is saved on a branch named `praxis-saved/...`. |
 | `praxis blocked <agent> "<why>"` | An agent asks you for help; it is paused until you answer. |
 | `praxis resume <agent>` | You answered; the agent may carry on. |
-| `praxis release-stale [agent...]` | Free the files of agents that went quiet for a long time. |
+| `praxis release-stale [agent...]` | Free the files of agents that went quiet for a long time (`--force`: even one that may still be working). |
 | `praxis setup <agent>` | Run praxis.toml's `setup` command in the agent's folder again. |
 
 `praxis start` refuses a branch with the agent's name that Praxis did not make (it may be someone's work). Add
@@ -231,6 +234,21 @@ is always kept); **3** Praxis hit a problem it did not expect; **130** stopped w
 
 All of these live in `praxis.toml`, and `praxis init` writes each one with a note. Praxis checks every setting's
 name and form, and stops with a plain message if one is wrong.
+
+**`exclusive_code`** (default `false`): code (text) files are shared. Several agents may claim and edit the
+same one; `praxis start` and `praxis claim` say who else is working on it, and `praxis status` lists every shared
+file with everyone working on it. At landing, putting the work on top of the newest main version is the clash
+check: if git cannot combine two agents' edits, nothing lands, and the agent is told which files clash and (when
+Praxis can tell) whose landing they clash with. Its folder is left clean, on its own branch, with every commit.
+Asset files are never shared. `exclusive_code = true` makes every file one agent at a time again.
+
+**`generated`**: files a command makes from other files, for example
+`generated = [{ path = "js/thermodata.js", command = "node tools/gen.cjs", from = ["js/thermo.js", "js/data.js"] }]`.
+Nobody may claim a generated file. After each landing whose change touched one of its `from` files, Praxis runs
+the command in the main folder (with `env`, no keyboard, no window, no time limit), still inside that landing's
+turn in the line, and if the file changed commits it onto main as "Rebuild js/thermodata.js (after claude-1's
+landing)". If the command fails, the landing stays: `praxis status` shows the file as out of date with the log,
+and the next landing tries again. Praxis never overwrites unsaved changes to the file in the main folder.
 
 **`branch_prefix`** (default `"praxis/"`): the start of every agent's branch name. It must be the start of a
 valid git branch name and end with `/`, for example `"agents/"`.
@@ -285,14 +303,25 @@ several Praxis versions can be installed side by side safely.
 - **An agent went quiet.** If an agent still holds files but has shown no sign of work for a long time
   (24 hours by default, `stale_after_hours` in praxis.toml), Praxis shows it. If that agent has stopped for
   good, run `praxis release-stale <name>` so others can use its files. Its folder and work are kept.
+  Signs of work are: a Praxis command, a saved change, a file being edited, a landing running or waiting, and a
+  program running inside its folder (a long test run: status says "running something now"). Praxis looks at the
+  programs once per `praxis status`. On Windows it reads each program's command line, so a program counts when
+  its command line names a path inside the folder (the shell an AI tool runs commands in usually does); it cannot
+  see another program's current folder. On Linux it reads both from /proc; on macOS, command lines from `ps`.
+  `release-stale` refuses an agent with programs running in its folder, edits not saved yet, or a landing in
+  line, and says which; add `--force` when you are sure it has stopped.
 
 ---
 
 ## Troubleshooting
 
 **"cannot claim these, because another agent is already working on them"**
-Working as intended: two agents wanted the same file. Give one of them other work, or wait until the
-first runs `praxis done`.
+Working as intended: two agents wanted the same asset file (or any file, with `exclusive_code = true`). Give
+one of them other work, or wait until the first runs `praxis done`.
+
+**"These files are generated, so nobody claims or edits them"**
+The file is listed under `generated` in praxis.toml: Praxis rebuilds it after landings. Claim and edit the files
+it is made from instead.
 
 **"NOT landed: the check failed"**
 The agent's change broke the check. Praxis printed the end of the check's output and kept the agent's work.
@@ -313,8 +342,9 @@ A newer Praxis has used this project, and this one does not know its database fo
 newer one for this project.
 
 **"its changes clash with newer work"**
-Another agent landed a change to the same lines first. The agent's work is safe. The message tells the agent
-exactly what to do (combine the changes, then land again). For asset files, which cannot be combined, the
+Another agent landed a change to the same lines first; the message names whose landing when Praxis can tell.
+The agent's work is safe and its folder is clean, on its own branch. The message tells the agent exactly what to
+do (rebase on the newest main version, combine the changes, then land again). For asset files, which cannot be combined, the
 agent has to redo its change on the newest version. Claiming asset files first prevents this.
 
 **"the main project folder has unsaved changes"**

@@ -17,7 +17,8 @@ HELP = """Praxis lets several AI agents work on one git project without breaking
 Everyday commands:
   praxis init                                   set this project up (once)
   praxis start <agent> "<task>" <files...>      give an agent its own folder and claim its files
-  praxis claim <agent> <files...>               claim more files or folders (asset files get locked)
+  praxis claim <agent> <files...>               say which files you will edit (code files can be shared,
+                                                asset files get locked to one agent)
   praxis land <agent>                           test the agent's work and put it into the main version
   praxis land <agent> --background              the same, carrying on after this command returns
   praxis wait <agent>                           follow a background landing to its end
@@ -28,7 +29,7 @@ When things go wrong:
   praxis blocked <agent> "<what it needs>"      an agent asks the human for help (pauses it)
   praxis resume <agent>                         the human lets a paused agent carry on
   praxis abandon <agent>                        stop an agent; unlanded work is saved on a branch
-  praxis release-stale [agent...]               free the files of agents that went quiet
+  praxis release-stale [agent...] [--force]     free the files of agents that went quiet
   praxis unclaim <agent> <files...>             let go of files
   praxis setup <agent>                          run praxis.toml's setup command in the agent's folder again
 
@@ -85,6 +86,8 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("release-stale", help="free the files of agents that went quiet")
     s.add_argument("agents", nargs="*")
+    s.add_argument("--force", action="store_true",
+                   help="release even an agent with programs running in its folder, unsaved edits or a landing in line")
     return p
 
 
@@ -145,7 +148,7 @@ def run(argv: list[str]) -> int:
         elif cmd == "resume":
             agents.resume(ctx, args.agent)
         elif cmd == "release-stale":
-            agents.release_stale(ctx, args.agents)
+            agents.release_stale(ctx, args.agents, force=args.force)
         return 0
     finally:
         store.close()

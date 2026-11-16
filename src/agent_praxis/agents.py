@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_praxis import config, gitops, paths
+from agent_praxis import config, generated, gitops, paths, processes
 from agent_praxis.config import Config
 from agent_praxis.errors import PraxisError
 from agent_praxis.gitops import GitError, Repo
@@ -317,14 +317,38 @@ def _roots(ctx: Ctx, agent_row=None) -> list[Path]:
 
 
 def _conflicts(ctx: Ctx, db, agent: str, wanted: list[str]) -> list[tuple[str, str, str, str, int]]:
-    """(wanted path, holder, held path, holder's task, is asset) for every clash with another agent's claim."""
+    """(wanted path, holder, held path, holder's task, is asset) for every overlap with another agent's claim."""
     found = []
     for other in db.execute("SELECT c.*, a.task FROM claims c JOIN agents a ON a.name = c.agent WHERE c.agent != ?",
                             (agent,)).fetchall():
         for path in wanted:
             if paths.overlaps(path, other["path"]):
-                found.append((path, other["agent"], other["path"], other["task"], other["is_asset"]))
+                is_asset = int(bool(other["is_asset"]) or paths.is_asset(path, ctx.cfg.assets))
+                found.append((path, other["agent"], other["path"], other["task"], is_asset))
     return found
+
+
+def is_exclusive(cfg: Config, clash: tuple) -> bool:
+    """True when this overlap must refuse: an asset file (never shared), or any file with exclusive_code on."""
+    return cfg.exclusive_code or bool(clash[4])
+
+
+def _split(cfg: Config, clashes: list[tuple]) -> tuple[list[tuple], list[tuple]]:
+    """(overlaps that refuse, overlaps on shared code files that are only noted)."""
+    refusing = [c for c in clashes if is_exclusive(cfg, c)]
+    return refusing, [c for c in clashes if not is_exclusive(cfg, c)]
+
+
+def _say_shared(ctx: Ctx, shared: list[tuple]) -> None:
+    """Tell the agent who else is working on the code files it just claimed."""
+    by_path: dict[str, list[str]] = {}
+    for path, holder, _held, _task, _asset in shared:
+        names = by_path.setdefault(path, [])
+        if holder not in names:
+            names.append(holder)
+    for path, names in by_path.items():
+        ctx.say(f"  {path} is also being edited by {' and '.join(names)}: your changes are checked against "
+                "theirs when you land.")
 
 
 def _refuse(agent: str, clashes: list[tuple[str, str, str, str, int]]) -> PraxisError:
@@ -390,6 +414,7 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str], reuse_branch: b
             "files first (git add -A, then git commit -m \"Project files\"); else fix main_branch in praxis.toml."
         )
     wanted = _dedupe([paths.normalize(p, _roots(ctx)) for p in wanted_raw])
+    generated.refuse_claims(ctx.cfg, wanted)
     folder = ctx.cfg.worktree_dir(ctx.repo.root) / name
     branch = ctx.cfg.branch_prefix + name
     if gitops.branch_exists(ctx.repo.root, branch) and not reuse_branch:
@@ -402,7 +427,7 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str], reuse_branch: b
     now = time.time()
     try:
         with ctx.store.write() as db:  # claims first, so two agents racing for the same files cannot both get them
-            lines = _conflicts(ctx, db, name, wanted)
+            lines, shared = _split(ctx.cfg, _conflicts(ctx, db, name, wanted))
             if lines:
                 raise _refuse(name, lines)
             db.execute("INSERT INTO agents (name, task, branch, worktree, started, last_seen) "
@@ -449,6 +474,7 @@ def start(ctx: Ctx, name: str, task: str, wanted_raw: list[str], reuse_branch: b
     ctx.say("Work ONLY in that folder.")
     ctx.say(f"(The main project folder, for `praxis done` at the end, is: {ctx.repo.root})")
     _say_claims(ctx, name, wanted, folder)
+    _say_shared(ctx, shared)
     if not wanted:
         ctx.say(f"No files are claimed yet. Claim before editing: praxis claim {name} <files or folders>")
     waiting = gitops.dirty_files(ctx.repo.root)
@@ -480,8 +506,28 @@ def _say_claims(ctx: Ctx, name: str, added: list[str], folder: Path) -> None:
             new = (f", only in the main folder and never committed, so {name}'s folder does not have it: "
                    "commit it in the main folder first")
         else:
-            new = ", does not exist yet: fine for a new file, else check the name"
+            new = ", does not exist yet: fine for a new file"
+            near = _similar_path(path, folder)
+            if near:
+                new += f" (did you mean {near}?)"
         ctx.say(f"  {path}  ({kind} {name}{new})")
+
+
+def _similar_path(path: str, folder: Path) -> str | None:
+    """An existing file or folder whose path is very close to *path* (a likely typo), or None. Only the names in
+    the folder that would hold *path* are compared, so this stays quick in a huge project."""
+    import difflib  # only here: it is slow to import
+
+    parent, _, leaf = path.rpartition("/")
+    where = folder / parent if parent else folder
+    try:
+        names = [entry.name for entry in os.scandir(where) if entry.name != ".git"]
+    except OSError:
+        return None
+    close = difflib.get_close_matches(leaf, names, n=1, cutoff=0.85)
+    if not close or close[0].casefold() == leaf.casefold():
+        return None
+    return f"{parent}/{close[0]}" if parent else close[0]
 
 
 def claim(ctx: Ctx, name: str, wanted_raw: list[str]) -> list[str]:
@@ -491,8 +537,9 @@ def claim(ctx: Ctx, name: str, wanted_raw: list[str]) -> list[str]:
     if not wanted_raw:
         raise PraxisError(f"Say which files or folders to claim, for example: praxis claim {name} levels/level2.tscn")
     wanted = _dedupe([paths.normalize(p, _roots(ctx, row)) for p in wanted_raw])
+    generated.refuse_claims(ctx.cfg, wanted)
     with ctx.store.write() as db:
-        lines = _conflicts(ctx, db, name, wanted)
+        lines, shared = _split(ctx.cfg, _conflicts(ctx, db, name, wanted))
         if lines:
             raise _refuse(name, lines)
         added = _insert_claims(db, ctx.cfg, name, wanted)
@@ -502,6 +549,7 @@ def claim(ctx: Ctx, name: str, wanted_raw: list[str]) -> list[str]:
         _say_claims(ctx, name, added, Path(row["worktree"]))
     else:
         ctx.say(f"{name} already held all of those.")
+    _say_shared(ctx, shared)
     return added
 
 
@@ -550,6 +598,19 @@ class Look:
     dirty: list = None
     activity: float = 0.0
     error: BaseException | None = None  # reading past the folder check failed
+    running: int = 0  # programs working inside its folder right now (a test run, a build)
+    landing: bool = False  # a landing (and its check) for it is running or waiting in line
+
+
+def busy(ctx: Ctx, rows: list, procs: list | None = None) -> dict[str, tuple[int, bool]]:
+    """{agent: (programs running inside its folder, a landing running or in line)}, from ONE look at the
+    process list for all agents (*procs*, when the caller already took it)."""
+    from agent_praxis import background  # here: background imports this module
+    from agent_praxis.landing_queue import landing_now
+    procs = processes.look() if procs is None and rows else (procs or [])
+    return {row["name"]: (len(processes.inside(procs, row["worktree"])),
+                          landing_now(ctx.store, row["name"]) or background.running(ctx, row["name"]))
+            for row in rows}
 
 
 LOOK_THREADS = 8
@@ -561,6 +622,8 @@ def look_at_agents(ctx: Ctx, rows: list) -> dict[str, Look]:
     The answers are the ones folder_state, unlanded and last_activity give."""
     if not rows:
         return {}
+    now = time.time()
+    working = busy(ctx, rows)  # first, so the git commands below (run in agents' folders) are never counted
     agent_branches = "refs/heads/" + ctx.cfg.branch_prefix
     tips = gitops.branch_tips(ctx.repo.root, [agent_branches])
     main_ref = f"refs/heads/{ctx.cfg.main_branch}"
@@ -572,6 +635,7 @@ def look_at_agents(ctx: Ctx, rows: list) -> dict[str, Look]:
         except Exception as exc:  # noqa: BLE001 - status shows the rest of the page anyway
             return Look(is_worktree=None, error=exc)
         look = Look(is_worktree=is_worktree, dirty=[])
+        look.running, look.landing = working[row["name"]]
         try:
             usable = folder.exists() and folder.is_dir() and bool(is_worktree)  # folder_state's "ok"
             branch_ref = f"refs/heads/{row['branch']}"
@@ -594,7 +658,7 @@ def look_at_agents(ctx: Ctx, rows: list) -> dict[str, Look]:
                     newest = max(newest, (folder / rel).stat().st_mtime)
                 except OSError:
                     pass
-            look.activity = newest
+            look.activity = now if look.running or look.landing else newest
         except Exception as exc:  # noqa: BLE001
             look.error = exc
         return look
@@ -1040,14 +1104,14 @@ def last_activity(ctx: Ctx, row) -> float:
     return newest
 
 
-def stale_agents(ctx: Ctx, now: float | None = None, activity: dict[str, float] | None = None
-                 ) -> list[tuple[object, float]]:
+def stale_agents(ctx: Ctx, now: float | None = None, activity: dict[str, float] | None = None,
+                 rows: list | None = None) -> list[tuple[object, float]]:
     """(agent row, hours quiet) for agents that still hold claims but have shown no sign of work for too long.
-    *activity*: last_activity answers the caller already has, by agent."""
+    *activity*: last_activity answers the caller already has, by agent. *rows*: only these agents."""
     now = now or time.time()
     activity = activity or {}
     found = []
-    for row in ctx.store.agents():
+    for row in ctx.store.agents() if rows is None else rows:
         if not ctx.store.claims(row["name"]):
             continue
         newest = activity[row["name"]] if row["name"] in activity else last_activity(ctx, row)
@@ -1057,12 +1121,18 @@ def stale_agents(ctx: Ctx, now: float | None = None, activity: dict[str, float] 
     return found
 
 
-def release_stale(ctx: Ctx, names: list[str]) -> list[str]:
-    """Release the claims and locks of stale agents (all of them, or only *names*). Their folders and work stay."""
+def release_stale(ctx: Ctx, names: list[str], force: bool = False) -> list[str]:
+    """Release the claims and locks of stale agents (all of them, or only *names*). Their folders and work stay.
+    An agent with programs running in its folder, edits not saved yet, or a landing in line is not released unless
+    *force*: it may only look quiet."""
     wanted = {check_name(n) for n in names}
-    released = []
-    for row, quiet in stale_agents(ctx):
-        if wanted and row["name"] not in wanted:
+    released, refused = [], {}
+    rows = [row for row in ctx.store.agents() if not wanted or row["name"] in wanted]
+    working = {} if force else busy(ctx, rows)
+    for row, quiet in stale_agents(ctx, rows=rows):
+        why = [] if force else _still_busy(ctx, row, *working[row["name"]])
+        if why:
+            refused[row["name"]] = "; ".join(why)
             continue
         held = [c["path"] for c in ctx.store.claims(row["name"])]
         with ctx.store.write() as db:
@@ -1072,8 +1142,28 @@ def release_stale(ctx: Ctx, names: list[str]) -> list[str]:
         released.append(row["name"])
         ctx.say(f"Released {row['name']}'s claims ({', '.join(held)}); it had been quiet for {quiet:.0f} hours.")
         ctx.say(f"  Its folder and any unfinished work are kept: {row['worktree']}")
-    for name in wanted - set(released):
+    for name in wanted - set(released) - set(refused):
         ctx.say(f"{name} is not stale, so nothing of it was released.")
+    if refused:
+        raise PraxisError(
+            "Not released, because these agents may still be working:\n"
+            + "\n".join(f"  - {name}: {why}" for name, why in refused.items())
+            + "\nTheir claims are kept. Check on them first. If you are sure they have stopped, release them "
+            "anyway with: praxis release-stale --force " + " ".join(refused))
     if not released and not wanted:
         ctx.say("No agent is stale. Nothing was released.")
     return released
+
+
+def _still_busy(ctx: Ctx, row, running: int, landing: bool) -> list[str]:
+    """Plain reasons an agent that looks quiet may still be working, or []."""
+    why = []
+    if running:
+        why.append(f"{running} program(s) are running inside its folder")
+    if landing:
+        why.append("a landing of its work is running or waiting in line")
+    if folder_state(ctx, row) == "ok":
+        dirty = gitops.dirty_files(Path(row["worktree"]))
+        if dirty:
+            why.append(f"{len(dirty)} file(s) in its folder have edits not saved yet ({', '.join(dirty[:5])})")
+    return why

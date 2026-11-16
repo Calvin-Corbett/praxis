@@ -2,9 +2,11 @@
 
 Steps, all while holding this agent's turn in the landing line:
 1. Save (commit) anything the agent changed but did not commit.
-2. Refuse if the agent changed files another agent holds.
-3. Put the agent's work on top of the newest main version (rebase, or merge if praxis.toml says so), then check
-   again what landing would really change in main: it must not touch files another agent holds.
+2. Refuse if the agent changed asset files another agent holds (code files are shared: see step 3).
+3. Put the agent's work on top of the newest main version (rebase, or merge if praxis.toml says so). This is the
+   clash check for shared code files: when git cannot combine two agents' edits, nothing lands and the agent is
+   told which files clash, and whose landing they clash with. Then check again what landing would really change in
+   main: it must not touch asset files another agent holds.
 4. Run the project's check command in the agent's folder.
 5. Only if it passes, and the folder still holds exactly the commit that was checked, move the main branch
    forward to the agent's work. Main only ever moves forward: it never loses a commit that already landed.
@@ -21,7 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import enough, gitops, hooks, paths
+from agent_praxis import enough, generated, gitops, hooks, paths
 from agent_praxis.agents import (
     JOINING_PREFIX,
     PARALLEL_CHECKOUT,
@@ -230,7 +232,8 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
         _record_landing(ctx, row, summary, log, tip)
         progress["recorded"] = True
         ctx.say(f"Landed: {row['name']}'s work on \"{row['task']}\" is now in {main} ({summary}).")
-        hooks.run_after_land(ctx, row, tip)
+        generated.rebuild_after_landing(ctx, row, base, tip)  # still this agent's turn: nobody else moves main
+        hooks.run_after_land(ctx, row, gitops.rev(root, main_ref) or tip)
         if not finish:
             ctx.say(f"When the task is finished: praxis done {row['name']}")
         return True
@@ -250,11 +253,14 @@ def _needs_the_human(ctx: Ctx, row, output: str, log: str) -> bool:
 
 
 def _held_by_others(ctx: Ctx, row, changed: list[str], note: bool = False) -> list[str]:
+    """Changed files another agent holds one at a time: asset files, or every file with exclusive_code on. Code
+    files are shared, so another agent working on one never stops a landing; only a real clash does."""
     others = [c for c in ctx.store.claims() if c["agent"] != row["name"]]
     mine = ctx.store.claims(row["name"])
     lines, loose_assets = [], []
     for path in changed:
-        holders = [c for c in others if paths.covers(c["path"], path)]
+        exclusive = ctx.cfg.exclusive_code or paths.is_asset(path, ctx.cfg.assets)
+        holders = [c for c in others if paths.covers(c["path"], path) and (exclusive or c["is_asset"])]
         if holders:
             lines.append(f"  - {path} (held by {holders[0]['agent']})")
         elif paths.is_asset(path, ctx.cfg.assets) and not any(paths.covers(c["path"], path) for c in mine):
@@ -272,6 +278,8 @@ def _integrate(ctx: Ctx, row, folder: Path):
         args = [*gitops.identity_args(folder), "merge", "--no-edit", "-q", f"refs/heads/{main}"]
     else:
         args = [*gitops.identity_args(folder), "rebase", "-q", f"refs/heads/{main}"]
+    before = gitops.rev(folder, "HEAD")
+    fork = gitops.git(["merge-base", "HEAD", f"refs/heads/{main}"], folder, check=False).stdout.strip()
     proc = gitops.git(args, folder, check=False)
     if proc.returncode == 0:
         return None
@@ -282,6 +290,9 @@ def _integrate(ctx: Ctx, row, folder: Path):
         if retried is None:
             return None
         clashing = retried or clashing  # what still clashes once the commits are joined, when that was tried
+    lost = _put_folder_back(row, folder, before)
+    if lost:
+        return _fail(ctx, row, "git", "the folder could not be put back as it was", lost)
     if not clashing:
         return _fail(ctx, row, "git", "git could not combine the work",
                      "git could not put your work on top of the newest main version:\n"
@@ -293,10 +304,63 @@ def _integrate(ctx: Ctx, row, folder: Path):
     if assets:
         advice += ("\nAsset files cannot be merged: " + ", ".join(assets) + ". Take the newest version of each and "
                    "redo your change to it, and claim asset files before editing next time.")
+    whose = _who_landed(ctx, folder, fork, clashing)
     return _fail(ctx, row, "conflict", f"its changes clash with newer work in {len(clashing)} file(s)",
                  "Your changes clash with work that landed while you were working, in:\n"
-                 + "\n".join(f"  - {p}" for p in clashing) + "\n" + advice,
+                 + "\n".join(f"  - {p}" + (f" (clashes with {whose[p]})" if p in whose else "") for p in clashing)
+                 + "\nNothing landed. Update your folder (rebase it on the newest main version), fix the clashes, "
+                 "then land again.\n" + advice,
                  problems=len(clashing), sig_text="\n".join(sorted(clashing)))
+
+
+def _put_folder_back(row, folder: Path, before: str | None) -> str | None:
+    """After a refused rebase or merge: the folder must be on the agent's own branch, with no half-done git step,
+    holding exactly the commit it held before. None when it is; else what is wrong, in plain words."""
+    _back_on_branch(row, folder)
+    head = gitops.rev(folder, "HEAD")
+    if (gitops.operation_in_progress(folder) is None and gitops.current_branch(folder) == row["branch"]
+            and head == before):
+        return None
+    return (f"git could not combine your work with the newest main version, and then Praxis could not put "
+            f"{row['name']}'s folder back exactly as it was. Your saved work is still in git (commit "
+            f"{before or 'unknown'}); nothing was deleted.\nThis needs the human: in {folder} run `git status`, "
+            f"then `git rebase --abort` if a rebase is shown, and `git switch {row['branch']}`.")
+
+
+def _who_landed(ctx: Ctx, folder: Path, fork: str, clashing: list[str]) -> dict[str, str]:
+    """{file: whose landing it clashes with} for each clashing file Praxis can tell: the agent of the last
+    landing (since this agent's work forked from main) that changed the file."""
+    main_ref = f"refs/heads/{ctx.cfg.main_branch}"
+    if not fork:
+        return {}
+    landed = ctx.store.rows("SELECT agent, commit_id FROM landings WHERE ok = 1 AND commit_id IS NOT NULL "
+                            "ORDER BY id DESC LIMIT 50")
+    whose = {}
+    for path in clashing[:20]:
+        last = gitops.git(["log", "-1", "--format=%H %s", f"{fork}..{main_ref}", "--", path], folder,
+                          check=False).stdout.strip()
+        if not last:
+            continue
+        commit, _, subject = last.partition(" ")
+        if subject.startswith("Rebuild ") and generated.entry_for(ctx.cfg, path):
+            whose[path] = "Praxis's own rebuild of this generated file"
+            continue
+        agent = _landing_holding(folder, commit, landed)
+        if agent:
+            whose[path] = f"{agent}'s landing"
+    return whose
+
+
+def _landing_holding(folder: Path, commit: str, landed: list) -> str | None:
+    """The agent whose landing brought *commit* into main: the oldest landing whose tip holds it. *landed* is
+    newest first."""
+    found = None
+    for item in landed:
+        if gitops.is_ancestor(folder, commit, item["commit_id"]):
+            found = item["agent"]
+        else:
+            break  # main only moves forward: older landings cannot hold it either
+    return found
 
 
 def _rebase_as_one(ctx: Ctx, row, folder: Path) -> list[str] | None:

@@ -45,6 +45,8 @@ class Config:
     env: dict[str, str] = field(default_factory=dict)
     setup: str = ""
     share: list[str] = field(default_factory=list)
+    exclusive_code: bool = False
+    generated: list[dict] = field(default_factory=list)
 
     def with_trailers(self, message: str, agent: str, task: str) -> str:
         """*message* with the commit_trailers lines added as git trailers (after a blank line), for a commit
@@ -124,6 +126,15 @@ check_may_change = [{", ".join(_q(p) for p in cfg.check_may_change)}]
 assets = [
 {assets}]
 
+# Code (text) files can be shared: several agents may claim and edit the same one, and Praxis refuses a
+# landing only when the edits really clash (the same lines). true makes code files one agent at a time too.
+exclusive_code = {"true" if cfg.exclusive_code else "false"}
+
+# Files a command makes from other files. Nobody claims or edits them: after each landing that changes one
+# of the `from` files, Praxis runs the command in the main folder and commits the new file, for example
+# generated = [{{ path = "js/data.js", command = "node tools/gen.cjs", from = ["js/a.js", "js/b.js"] }}]
+generated = [{_generated(cfg.generated)}]
+
 # Where each agent's own folder is made. Empty means next to the project, in "<project>-praxis".
 worktree_root = {_q(cfg.worktree_root)}
 
@@ -160,6 +171,11 @@ commit_trailers = [{", ".join(_q(p) for p in cfg.commit_trailers)}]
 # env = {{ TEMP = "D:/tmp", TMP = "D:/tmp" }}
 env = {_inline_table(cfg.env)}
 """
+
+
+def _generated(items: list[dict]) -> str:
+    return ", ".join("{ path = " + _q(g["path"]) + ", command = " + _q(g["command"]) + ", from = ["
+                     + ", ".join(_q(f) for f in g["from"]) + "] }" for g in items)
 
 
 def _inline_table(values: dict[str, str]) -> str:
@@ -250,6 +266,9 @@ def _mini_toml(text: str) -> dict:
         if not eq:
             raise PraxisError(f"praxis.toml line {no}: expected `name = value`.")
         name, raw = name.strip(), raw.strip()
+        if name == "generated" and raw not in ("[]", ""):
+            raise PraxisError("praxis.toml: reading `generated` needs Python 3.11 or newer (or the tomli package "
+                              "installed). Install one of those, or remove the generated line.")
         if raw.startswith("[") and "]" not in raw:
             pending_key, pending, start = name, raw, no
             continue
@@ -283,6 +302,7 @@ def load(root: Path) -> Config:
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
     _check_branch_prefix(cfg.branch_prefix)
     _check_trailers(cfg.commit_trailers)
+    cfg.generated = _check_generated(cfg.generated)
     if any(ch in cfg.check for ch in "\b\t\f\r\n\v"):
         raise PraxisError(
             "praxis.toml: the check line holds a hidden control character. In TOML a backslash inside double quotes "
@@ -322,13 +342,57 @@ def _check_trailers(lines: list[str]) -> None:
             )
 
 
+def _check_generated(items: list) -> list[dict]:
+    """Each generated entry must be { path = "...", command = "...", from = ["...", ...] }. Paths are kept with
+    forward slashes, from the top of the project."""
+    example = ('for example generated = [{ path = "js/data.js", command = "node tools/gen.cjs", '
+               'from = ["js/a.js"] }]')
+    seen, out = set(), []
+    for n, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            raise PraxisError(f"praxis.toml: generated entry {n} must be a table in braces, {example}.")
+        extra = sorted(set(item) - {"path", "command", "from"})
+        if extra:
+            raise PraxisError(f"praxis.toml: generated entry {n} has setting(s) Praxis does not know: "
+                              + ", ".join(extra) + f". It reads path, command and from, {example}.")
+        path, command, sources = item.get("path"), item.get("command"), item.get("from")
+        if not isinstance(path, str) or not _clean(path):
+            raise PraxisError(f"praxis.toml: generated entry {n} needs path, the file the command makes, {example}.")
+        if not isinstance(command, str) or not command.strip():
+            raise PraxisError(f"praxis.toml: generated entry {n} ({path}) needs command, the command that makes "
+                              f"it, {example}.")
+        if (not isinstance(sources, list) or not sources
+                or not all(isinstance(s, str) and _clean(s) for s in sources)):
+            raise PraxisError(f"praxis.toml: generated entry {n} ({path}) needs from, a list of the files it is "
+                              f"made from, {example}.")
+        path = _clean(path)
+        sources = [_clean(s) for s in sources]
+        if path.casefold() in {s.casefold() for s in sources}:
+            raise PraxisError(f"praxis.toml: generated entry {n}: {path} cannot be made from itself.")
+        if path.casefold() in seen:
+            raise PraxisError(f"praxis.toml: {path} is listed twice under generated.")
+        seen.add(path.casefold())
+        out.append({"path": path, "command": command.strip(), "from": sources})
+    return out
+
+
+def _clean(path: str) -> str:
+    """A project path from the top, with forward slashes; "" when it is empty or reaches outside the project."""
+    parts = [p for p in path.strip().replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or ".." in parts or ":" in parts[0]:
+        return ""
+    return "/".join(parts)
+
+
 # Every setting Praxis reads, with the kind of value it must be.
 _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str,
-          "setup": str, "share": list, "after_land": str, "commit_trailers": list, "env": dict}
+          "setup": str, "share": list, "after_land": str, "commit_trailers": list, "env": dict,
+          "exclusive_code": bool, "generated": "tables"}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
-               dict: 'a table of names and text values, like { TEMP = "D:/tmp" }'}
+               dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',
+               bool: "true or false", "tables": 'a list of tables in square brackets, like [{ path = "a.js", ... }]'}
 
 
 def _typed(name: str, value):
@@ -339,6 +403,10 @@ def _typed(name: str, value):
         ok = isinstance(value, list) and all(isinstance(v, str) for v in value)
     elif kind is dict:
         ok = isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+    elif kind is bool:
+        ok = isinstance(value, bool)
+    elif kind == "tables":
+        ok = isinstance(value, list)
     elif kind is int:
         ok = isinstance(value, int) and not isinstance(value, bool)
     else:

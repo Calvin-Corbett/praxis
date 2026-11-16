@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from agent_praxis import generated, paths
 from agent_praxis.agents import Ctx, agent_here, folder_state, look_at_agents, stale_agents
 from agent_praxis.landing_queue import ticket_alive
 
@@ -110,10 +111,16 @@ def render(ctx: Ctx) -> str:
             landed = store.row("SELECT 1 FROM landings WHERE agent = ? AND ok = 1 AND at >= ?", (a["name"], a["started"]))
             idle = "nothing new since its last landing" if landed else "no changes yet"
             out.append("      work: " + ("; ".join(work) if work else idle))
+            if look.running:
+                out.append(f"      running something now ({look.running} process{'es' if look.running != 1 else ''}"
+                           " working in its folder)")
             out.append(f"      last sign of work: {ago(look.activity, now)}")
         except Exception:  # noqa: BLE001 - a damaged folder must not hide the rest of the page
             out.append("      work: (could not read its folder)")
     out.append("")
+
+    out += _shared_files(cfg, claims)
+    out += _generated_lines(ctx)
 
     locks = [c for c in claims if c["is_asset"]]
     out.append("LOCKED ASSET FILES (only the holder may change these)" if locks else "LOCKED ASSET FILES: none")
@@ -144,3 +151,42 @@ def render(ctx: Ctx) -> str:
         out.append("")
         out.append("Note: no check command is set in praxis.toml, so landings are not tested.")
     return "\n".join(out).rstrip() + "\n"
+
+
+def _shared_files(cfg, claims) -> list[str]:
+    """Code files (or folders) that more than one agent is working on, each with everyone working on it."""
+    if cfg.exclusive_code:
+        return []
+    code = [c for c in claims if not c["is_asset"]]
+    seen, lines = set(), []
+    for c in code:
+        if paths.key(c["path"]) in seen:
+            continue
+        seen.add(paths.key(c["path"]))
+        names = []
+        for other in code:
+            if paths.overlaps(c["path"], other["path"]) and other["agent"] not in names:
+                names.append(other["agent"])
+        if len(names) > 1:
+            lines.append(f"  - {c['path']}: {', '.join(names)}")
+    if not lines:
+        return []
+    return ["SHARED CODE FILES (several agents edit these at once; a real clash is caught when each one lands)",
+            *lines, ""]
+
+
+def _generated_lines(ctx) -> list[str]:
+    stale = generated.out_of_date(ctx.store)
+    if not ctx.cfg.generated:
+        return []
+    out = ["GENERATED FILES (Praxis rebuilds these after landings; nobody edits them)"]
+    for item in ctx.cfg.generated:
+        info = stale.get(item["path"])
+        if info is None:
+            out.append(f"  - {item['path']}: up to date (made by `{item['command']}`)")
+        else:
+            out.append(f"  - {item['path']}: OUT OF DATE since {ago(info.get('at', 0))}: {info.get('why', '')}")
+            if info.get("log"):
+                out.append(f"      Output of the last try: {info['log']}")
+            out.append("      The next landing tries again.")
+    return [*out, ""]

@@ -28,11 +28,15 @@ only changes the text between the two praxis marker lines.)
 3. Your folder holds only what is committed. Things git ignores (installed packages such
    as node_modules, engine caches such as Unity's Library) are not there: install or
    import them in your own folder (for example `npm install`) before you run the check.
-4. To change more files later, claim them first:
+4. Claim every file you plan to edit, so the others can see it:
    `praxis claim <your-name> <file or folder> ...`
-   If Praxis says another agent holds a file, do not edit it. Pick other work, or wait.
-5. Asset files (scenes, levels, prefabs, models, textures, sounds) cannot be merged.
-   Never edit one you have not claimed. Claim it before you touch it.
+   Code (text) files can be shared: another agent may be editing the same file, and Praxis
+   says so. Carry on; your changes are checked against theirs when you land.
+   If Praxis refuses a claim, do not edit that file. Pick other work, or wait.
+5. Asset files (scenes, levels, prefabs, models, textures, sounds) cannot be merged, so they
+   are never shared. Never edit one you have not claimed. Claim it before you touch it.
+   Generated files (listed under `generated` in praxis.toml) are rebuilt by Praxis: never
+   edit them; edit the files they are made from.
 6. When your change is finished, run `praxis land <your-name>`.
    Praxis saves (commits) your work, puts it on top of the newest version, runs the
    project check and lands it only if the check passes. It may wait in line for other
@@ -42,7 +46,9 @@ only changes the text between the two praxis marker lines.)
    `praxis wait <your-name>` (run it again if it is cut off) to see how the landing ended.
    If the check says the problem is outside your work, tell the human; do not try to fix it.
 7. If landing fails, read the failure text Praxis prints, fix the problem in your folder,
-   and run `praxis land <your-name>` again. Your work is always kept.
+   and run `praxis land <your-name>` again. Your work is always kept. If it says your changes
+   clash with newer work, update your folder: run the `git rebase` command it names there,
+   fix the files it lists, `git rebase --continue`, then land again.
 8. When your task is finished and landed, finish from the main project folder (a folder
    cannot be removed while you are in it): `cd` to the main folder Praxis named, then run
    `praxis done <your-name>`.
