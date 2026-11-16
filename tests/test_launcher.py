@@ -42,7 +42,7 @@ def _fake_python(folder: Path, word: str) -> Path:
 def _run(home: Path, *args: str, **kw) -> subprocess.CompletedProcess:
     env = dict(os.environ, PYTHONPATH=str(SRC), PRAXIS_HOME=str(home))
     cmd = [str(_launcher_file(home)), *args]
-    return subprocess.run(cmd, capture_output=True, text=True, env=env, **kw)
+    return subprocess.run(cmd, check=False, capture_output=True, text=True, env=env, **kw)
 
 
 def _registry(home: Path, *items: tuple[str, Path]) -> None:
