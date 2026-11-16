@@ -325,7 +325,7 @@ def test_an_older_database_is_upgraded_in_place(tmp_path):
     db.close()
     store = store_module.Store(tmp_path)
     try:
-        assert store.row("PRAGMA user_version")[0] == 3
+        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT == 4
         assert store.agent("alice")["task"] == "jump"
         assert store.rows("SELECT * FROM branches") == []
         assert store.rows("SELECT * FROM background") == []

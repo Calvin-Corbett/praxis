@@ -138,6 +138,7 @@ def render(ctx: Ctx) -> str:
         out.append(f"  - {c['path']}  held by {c['agent']} since {ago(c['since'], now)}")
     out.append("")
 
+    out += _checks_lines(ctx)
     out += _heavy_lines(ctx, now)
 
     out.append("LANDING LINE" if line else "LANDING LINE: empty")
@@ -165,13 +166,33 @@ def render(ctx: Ctx) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _checks_lines(ctx) -> list[str]:
+    from agent_praxis import checkcache
+
+    out = []
+    if ctx.cfg.checks:
+        out.append("CHECKS (a landing runs the first of these whose paths match a file it changes; else the default)")
+        for n, entry in enumerate(ctx.cfg.checks, 1):
+            out.append(f"  {n}. {', '.join(entry['paths'])}: {entry['run']}")
+        out.append(f"  default: {ctx.cfg.check or '(none)'}")
+    kept = checkcache.count(ctx.store)
+    if kept:
+        out.append(f"{'  ' if out else 'CHECK CACHE: '}{kept} passed check(s) remembered: the same tree is not "
+                   "checked twice with the same command")
+    return [*out, ""] if out else []
+
+
 def _heavy_lines(ctx, now: float) -> list[str]:
     from agent_praxis import heavy
 
     jobs = heavy.rows(ctx.store)
-    if not jobs:
+    if ctx.cfg.heavy_jobs == "auto":
+        limit, why = heavy.limit_now(ctx)
+        out = [f"HEAVY JOBS (at most {limit} run at once right now; `praxis run --heavy <command>`)", f"  {why}"]
+    elif jobs:
+        out = [f"HEAVY JOBS (at most {ctx.cfg.heavy_jobs} run at once; `praxis run --heavy <command>`)"]
+    else:
         return []
-    out = [f"HEAVY JOBS (at most {ctx.cfg.heavy_jobs} run at once; `praxis run --heavy <command>`)"]
     for j in jobs:
         if j["started"]:
             out.append(f"  - running: {j['agent']}, started {ago(j['started'], now)}: {j['command']}")

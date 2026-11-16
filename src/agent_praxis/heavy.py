@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from agent_praxis import agents, hooks
+from agent_praxis import agents, hooks, load
 from agent_praxis.errors import PraxisError
 from agent_praxis.landing_queue import _try_lock, _unlock, held
 from agent_praxis.store import Store
@@ -37,6 +37,16 @@ def rows(store: Store) -> list:
     """Running and waiting heavy jobs, oldest first. Rows whose runner is gone are left out (and cleared by the
     next runner)."""
     return [r for r in store.rows("SELECT * FROM heavy ORDER BY id") if alive(store, r["token"])]
+
+
+def limit_now(ctx) -> tuple[int, str]:
+    """(how many heavy jobs may run at once right now, and why). A number in praxis.toml is that number; "auto" is
+    sized from the machine's load at this moment (see load.auto_limit)."""
+    setting = ctx.cfg.heavy_jobs
+    if setting != "auto":
+        return max(1, int(setting)), f"heavy_jobs = {setting} in praxis.toml"
+    running = sum(1 for r in rows(ctx.store) if r["started"])
+    return load.auto_limit(running, load.read(), ctx.cfg.heavy_max)
 
 
 def _forget_dead(store: Store, db, mine: int) -> None:
@@ -78,7 +88,6 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
         command = command[1:]
     if not command:
         raise PraxisError("Give the command to run, for example: praxis run --heavy pytest")
-    limit = max(1, ctx.cfg.heavy_jobs)
     store = ctx.store
     agent = os.environ.get("PRAXIS_AGENT") or agents.agent_here(ctx) or "(nobody)"
     text = command[0] if len(command) == 1 else subprocess.list2cmdline(command)
@@ -101,6 +110,7 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
             ).lastrowid
         told = None
         while True:
+            limit, why = limit_now(ctx)  # read outside the database lock: measuring the load takes a moment
             go, ahead = _try_start(store, mine, limit)
             if go:
                 break
@@ -108,7 +118,8 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
                 told = len(ahead)
                 ctx.say(
                     f"Waiting in line for a heavy job place: {len(ahead)} in front "
-                    f"({', '.join(r['agent'] for r in ahead)}), at most {limit} run at once on this project. "
+                    f"({', '.join(r['agent'] for r in ahead)}), at most {limit} run at once on this project "
+                    f"({why}). "
                     "Praxis waits as long as it takes; this is normal."
                 )
             time.sleep(poll)

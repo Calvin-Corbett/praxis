@@ -3,6 +3,19 @@
 ## Unreleased
 
 ### New
+- **The check can depend on what you change.** Add `checks = [{ paths = ["js/thermo.js", "css/**"], run = "npm run
+  test:ui" }, ...]` to `praxis.toml`. For a landing Praxis runs the command of the FIRST entry whose `paths` match
+  any file the landing changes, and your normal `check` when none does, so put the strictest entries first. Without
+  `checks` nothing changes. The landing output and `praxis status` name the check that was used.
+- **A check that already passed is not run twice.** If the exact tree Praxis is about to land already passed the same
+  check command, you now see "Skipping the check: same tree already passed at <time>" and the landing goes on. A
+  different command text never reuses a pass, a failure is never remembered, and the newest 200 passes are kept in
+  the project database. This needs database format 4: Praxis upgrades your project's database the first time the
+  new version opens it, and an older Praxis then refuses that project (update it, or use the launcher).
+- **`heavy_jobs = "auto"`.** Praxis sizes the number of heavy jobs from the machine's load each time a job asks: more
+  places while the CPU and memory are idle, fewer when it is busy, aiming for about 75 percent CPU, never below 1 and
+  never above the new `heavy_max` (default: half the CPU cores, at least 2). A number still works as before.
+  `praxis status` shows the current limit and why.
 - **A heavy job can start another heavy job without freezing.** If the command you run with `praxis run --heavy`
   itself calls `praxis run --heavy`, the inner call used to hold a place while waiting for another, so two such jobs
   at the limit waited for each other forever. Now every heavy job's environment carries `PRAXIS_HEAVY_TOKEN`, and an

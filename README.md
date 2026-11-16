@@ -278,7 +278,28 @@ landing)". If the command fails, the landing stays: `praxis status` shows the fi
 and the next landing tries again. Praxis never overwrites unsaved changes to the file in the main folder.
 
 **`heavy_jobs`** (default `2`): how many `praxis run --heavy` jobs may run at once on this project (see
-"Heavy jobs" above). The rest wait in line. Must be 1 or more.
+"Heavy jobs" above). The rest wait in line. A whole number, 1 or more, or `"auto"`: Praxis then works the limit out
+from the machine's load each time a job asks. Idle CPU and memory give more places, a busy machine gives fewer,
+aiming for about 75 percent CPU in total; the limit is never below 1 and never above **`heavy_max`** (default: half
+the CPU cores, at least 2). Jobs already running are never stopped when the limit drops: it only decides whether the
+next one may start. `praxis status` shows the current limit and the load it came from. Load is read with the
+Python standard library only (Windows counters through ctypes, `/proc` and the load average elsewhere); if it cannot
+be read, `"auto"` allows 2.
+
+**`checks`**: a different check for different changes, for example
+`checks = [{ paths = ["js/thermo.js", "css/**"], run = "npm run test:ui" }, { paths = ["js/**"], run = "npm run test:js" }]`.
+For a landing Praxis looks at the files the landing changes and runs the `run` command of the FIRST entry with a
+`paths` pattern matching any of them; if none matches it runs `check`. So the order is the strictness: put the
+entries that must always win first. Patterns are read from the top of the project like the other path settings
+(`*` stays inside one folder, `**` spans folders). Without `checks`, nothing changes. The landing output and
+`praxis status` name the check that was used, for example "check passed (check 1 of `checks` (css/**))".
+
+**The check cache.** When the exact files that would land (the git tree of the candidate) already passed the same
+check command, Praxis does not run the check again and says "Skipping the check: same tree already passed at
+<time>". The command text must be identical: change the command in praxis.toml and nothing is reused. A failure
+is never remembered, and the newest 200 passes are kept in the project database (database format 4). A check
+that depends on something outside the files (the date, a web service) can pass today and fail tomorrow on the
+same tree; keep such a check out of what you rely on, or change its command text to start fresh.
 
 **`branch_prefix`** (default `"praxis/"`): the start of every agent's branch name. It must be the start of a
 valid git branch name and end with `/`, for example `"agents/"`.
@@ -469,7 +490,7 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import
   copies of your project). Change this with `worktree_root` in praxis.toml.
 - Each agent works on its own git branch, `praxis/<name>` (`branch_prefix` in praxis.toml changes the start).
-- The heavy job queue is in the same database; each job's output goes to `.git/praxis/logs/<agent>-heavy-<time>.log`.
+- The check cache (the newest 200 passes) and the heavy job queue are in the same database; each job's output goes to `.git/praxis/logs/<agent>-heavy-<time>.log`.
 - Background landings write to `.git/praxis/background/<agent>.log`; setup, after_land and check output go to
   `.git/praxis/logs/`.
 

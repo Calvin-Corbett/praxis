@@ -23,7 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import enough, generated, gitops, hooks, paths
+from agent_praxis import checkcache, enough, generated, gitops, hooks, paths
 from agent_praxis.agents import (
     JOINING_PREFIX,
     PARALLEL_CHECKOUT,
@@ -179,6 +179,7 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
     main_ref, branch_ref = f"refs/heads/{main}", f"refs/heads/{row['branch']}"
     for _ in range(RETRIES_WHEN_MAIN_MOVES):
         base = gitops.rev(root, main_ref)
+        landing_changes: list[str] = []
         # Early, cheap refusal: files the agent changed that now differ from main and that someone else holds.
         early = set(gitops.changed_files(root, base, branch_ref)) & set(gitops.changed_between(root, base, branch_ref))
         clashes = _held_by_others(ctx, row, sorted(early))
@@ -209,9 +210,17 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
                          "another agent holds.")
         checked = gitops.rev(folder, "HEAD")
         log = None
-        if ctx.cfg.check.strip():
-            ctx.say(f"Running the check: {ctx.cfg.check}")
-            code, output, log = _run_check(ctx, row, folder)
+        command, which = ctx.cfg.check_for(landing_changes)
+        command = command.strip()
+        named = f" ({which})" if ctx.cfg.checks else ""  # without `checks` it is just "the check", as before
+        tree = gitops.git(["rev-parse", "HEAD^{tree}"], folder, check=False).stdout.strip()
+        cached = checkcache.passed_at(ctx.store, tree, command) if command and tree else None
+        if cached is not None:
+            ctx.say(f"Skipping the check{named}: same tree already passed at "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cached))} with the same command: {command}")
+        elif command:
+            ctx.say(f"Running the check{named}: {command}")
+            code, output, log = _run_check(ctx, row, folder, command)
             _put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
             if code == NEEDS_THE_HUMAN:
                 return _needs_the_human(ctx, row, output, log)
@@ -225,12 +234,17 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
             moved = _changed_during_check(ctx, row, folder, checked)
             if moved:
                 return _fail(ctx, row, "changed-during-check", "files changed while the check ran", moved)
+            if tree:
+                checkcache.record(ctx.store, tree, command)  # only a pass is remembered, never a failure
         if gitops.rev(root, main_ref) != base:
             ctx.say("The main version changed while the check ran. Doing it again on top of the newest version.")
             continue
-        summary = "check passed" if ctx.cfg.check.strip() else "no check is set, so nothing was tested"
+        summary = "no check is set, so nothing was tested"
+        if command:
+            summary = ("check passed" + (", same tree already passed" if cached is not None else "")
+                       + (f" ({which})" if named else ""))
         progress.update(checked=checked, summary=summary, log=log)
-        advanced = _advance(ctx, row, base, checked)
+        advanced = _advance(ctx, row, base, checked, bool(command))
         if advanced == MAIN_MOVED:
             progress.clear()
             ctx.say("The main version changed just as Praxis was moving it forward. Doing it again on top of the "
@@ -586,19 +600,19 @@ def _new_log(logs: Path, agent: str) -> Path:
     return log
 
 
-def _run_check(ctx: Ctx, row, folder: Path) -> tuple[int, str, str]:
+def _run_check(ctx: Ctx, row, folder: Path, command: str) -> tuple[int, str, str]:
     """(the check's exit code, the end of its output, its log)."""
     env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
     logs = ctx.store.dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = _new_log(logs, row["name"])
     with open(log, "wb") as out:
-        out.write(f"$ {ctx.cfg.check}\n\n".encode())
+        out.write(f"$ {command}\n\n".encode())
         out.flush()
         # No time limit, on purpose. No keyboard either: a check that waits for a key (`pause`) would hold the
         # landing line forever. The output goes straight to the log, so a huge output never fills memory.
         guard = _CheckEndsWithMe()
-        proc = subprocess.Popen(ctx.cfg.check, shell=True, cwd=str(folder), env=env,
+        proc = subprocess.Popen(command, shell=True, cwd=str(folder), env=env,
                                 stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
         try:
             guard.watch(proc)
@@ -727,10 +741,10 @@ def _put_back_check_rewrites(ctx: Ctx, row, folder: Path) -> None:
             + (f" and {len(changed) - 8} more" if len(changed) > 8 else "") + f". Copies as the check left them: {dest}")
 
 
-def _advance(ctx: Ctx, row, base: str, target: str):
+def _advance(ctx: Ctx, row, base: str, target: str, checked: bool = True):
     """Move main forward to the checked commit. True when done, else the plain reason it could not."""
     main, root = ctx.cfg.main_branch, ctx.repo.root
-    ready = "Your work passed the check" if ctx.cfg.check.strip() else "Your work is ready (no check is set)"
+    ready = "Your work passed the check" if checked else "Your work is ready (no check is set)"
     if not gitops.is_ancestor(root, base, target):
         return (f"The work is not built on top of the newest {main}, so moving {main} to it would drop commits "
                 f"that already landed. Praxis did not move {main}. Land again.")

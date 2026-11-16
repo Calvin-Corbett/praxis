@@ -16,7 +16,7 @@ from agent_praxis.errors import PraxisError
 
 # The database's format number (kept in SQLite's user_version). Raise it whenever the tables change, and add the
 # step that brings an older database up to it to UPGRADES. A database from before format numbers reads as 0.
-FORMAT = 3
+FORMAT = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -91,6 +91,15 @@ CREATE TABLE IF NOT EXISTS heavy (
     enqueued REAL NOT NULL,
     started REAL,
     pid INTEGER
+);
+""",
+    4: """
+CREATE TABLE IF NOT EXISTS checkcache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tree TEXT NOT NULL,
+    command TEXT NOT NULL,
+    passed_at REAL NOT NULL,
+    UNIQUE (tree, command)
 );
 """,
 }

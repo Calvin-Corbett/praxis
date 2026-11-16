@@ -7,9 +7,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_praxis import paths
 from agent_praxis.errors import PraxisError
 
 FILE_NAME = "praxis.toml"
+CONTROL = "\b\t\f\r\n\v"  # control characters a TOML backslash code can leave in a command
 
 # Files that git cannot merge in any game project: pictures, sound, video, 3D models, fonts, archives.
 COMMON_ASSETS = [
@@ -47,8 +49,18 @@ class Config:
     setup: str = ""
     share: list[str] = field(default_factory=list)
     exclusive_code: bool = False
-    heavy_jobs: int = 2
+    heavy_jobs: int | str = 2  # a number, or "auto": sized from the machine's load each time a job asks
+    heavy_max: int = 0  # the most places "auto" may use; 0 means half the CPU cores, at least 2
     generated: list[dict] = field(default_factory=list)
+    checks: list[dict] = field(default_factory=list)
+
+    def check_for(self, changed: list[str]) -> tuple[str, str]:
+        """(the check command, its name) for a landing that changes the files *changed*: the command of the FIRST
+        `checks` entry with a pattern matching any changed file, else the default `check`."""
+        for n, entry in enumerate(self.checks, 1):
+            if any(paths.matches_from_top(path, entry["paths"]) for path in changed):
+                return entry["run"], f"check {n} of `checks` ({', '.join(entry['paths'])})"
+        return self.check, "default check"
 
     def with_trailers(self, message: str, agent: str, task: str) -> str:
         """*message* with the commit_trailers lines added as git trailers (after a blank line), for a commit
@@ -133,8 +145,17 @@ assets = [
 exclusive_code = {"true" if cfg.exclusive_code else "false"}
 
 # How many heavy jobs (`praxis run --heavy <command>`: whole test suites, browser runs) may run at once on this
-# project, across all agents. The others wait in line.
-heavy_jobs = {cfg.heavy_jobs}
+# project, across all agents. The others wait in line. A number, or "auto": Praxis then sizes the limit from the
+# machine's load each time a job asks (more places while the CPU and memory are idle, fewer under load, aiming
+# for about 75 percent CPU), never below 1 and never above heavy_max (default: half the CPU cores, at least 2).
+heavy_jobs = {_q(cfg.heavy_jobs) if isinstance(cfg.heavy_jobs, str) else cfg.heavy_jobs}
+{_heavy_max(cfg)}
+# Different checks for different changes. Praxis looks at the files a landing changes and runs the `run`
+# command of the FIRST entry here whose `paths` match any changed file; otherwise it runs `check` above. So
+# put the strictest entries first. Paths are read from the top of the project (* stays inside one folder,
+# ** spans folders), for example
+# checks = [{{ paths = ["js/thermo.js", "css/**"], run = "npm run test:ui" }}]
+checks = [{_checks(cfg.checks)}]
 
 # Files a command makes from other files. Nobody claims or edits them: after each landing that changes one
 # of the `from` files, Praxis runs the command in the main folder and commits the new file, for example
@@ -181,6 +202,15 @@ commit_trailers = [{", ".join(_q(p) for p in cfg.commit_trailers)}]
 # env = {{ TEMP = "D:/tmp", TMP = "D:/tmp" }}
 env = {_inline_table(cfg.env)}
 """
+
+
+def _heavy_max(cfg: Config) -> str:
+    return f"heavy_max = {cfg.heavy_max}\n" if cfg.heavy_max else ""
+
+
+def _checks(items: list[dict]) -> str:
+    return ", ".join("{ paths = [" + ", ".join(_q(p) for p in c["paths"]) + "], run = " + _q(c["run"]) + " }"
+                     for c in items)
 
 
 def _generated(items: list[dict]) -> str:
@@ -276,9 +306,9 @@ def _mini_toml(text: str) -> dict:
         if not eq:
             raise PraxisError(f"praxis.toml line {no}: expected `name = value`.")
         name, raw = name.strip(), raw.strip()
-        if name == "generated" and raw not in ("[]", ""):
-            raise PraxisError("praxis.toml: reading `generated` needs Python 3.11 or newer (or the tomli package "
-                              "installed). Install one of those, or remove the generated line.")
+        if name in ("generated", "checks") and raw not in ("[]", ""):
+            raise PraxisError(f"praxis.toml: reading `{name}` needs Python 3.11 or newer (or the tomli package "
+                              f"installed). Install one of those, or remove the {name} line.")
         if raw.startswith("[") and "]" not in raw:
             pending_key, pending, start = name, raw, no
             continue
@@ -308,14 +338,22 @@ def load(root: Path) -> Config:
     for name, value in data.items():
         setattr(cfg, name, _typed(name, value))
     cfg.enough_after = max(2, cfg.enough_after)
-    if cfg.heavy_jobs < 1:
-        raise PraxisError("praxis.toml: heavy_jobs must be 1 or more.")
+    if isinstance(cfg.heavy_jobs, str) and cfg.heavy_jobs.strip().lower() != "auto":
+        raise PraxisError(f'praxis.toml: heavy_jobs must be a whole number (1 or more) or "auto", not '
+                          f"{cfg.heavy_jobs!r}.")
+    if isinstance(cfg.heavy_jobs, str):
+        cfg.heavy_jobs = "auto"
+    elif cfg.heavy_jobs < 1:
+        raise PraxisError('praxis.toml: heavy_jobs must be 1 or more (or "auto").')
+    if cfg.heavy_max < 0:
+        raise PraxisError("praxis.toml: heavy_max must be 1 or more (or leave it out).")
     if cfg.land_method not in ("rebase", "merge"):
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
     _check_branch_prefix(cfg.branch_prefix)
     _check_trailers(cfg.commit_trailers)
     cfg.generated = _check_generated(cfg.generated)
-    if any(ch in cfg.check for ch in "\b\t\f\r\n\v"):
+    cfg.checks = _check_checks(cfg.checks)
+    if any(ch in cfg.check for ch in CONTROL):
         raise PraxisError(
             "praxis.toml: the check line holds a hidden control character. In TOML a backslash inside double quotes "
             r'starts a code (\b, \t), so check = "tools\build.bat" does not mean what it looks like. Use forward '
@@ -388,6 +426,32 @@ def _check_generated(items: list) -> list[dict]:
     return out
 
 
+def _check_checks(items: list) -> list[dict]:
+    """Each checks entry must be { paths = ["...", ...], run = "..." }. Patterns are kept with forward slashes."""
+    example = 'for example checks = [{ paths = ["js/thermo.js", "css/**"], run = "npm run test:ui" }]'
+    out = []
+    for n, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            raise PraxisError(f"praxis.toml: checks entry {n} must be a table in braces, {example}.")
+        extra = sorted(set(item) - {"paths", "run"})
+        if extra:
+            raise PraxisError(f"praxis.toml: checks entry {n} has setting(s) Praxis does not know: "
+                              + ", ".join(extra) + f". It reads paths and run, {example}.")
+        patterns, run = item.get("paths"), item.get("run")
+        if (not isinstance(patterns, list) or not patterns
+                or not all(isinstance(p, str) and _clean(p) for p in patterns)):
+            raise PraxisError(f"praxis.toml: checks entry {n} needs paths, a list of the files or patterns that "
+                              f"choose it, {example}.")
+        if not isinstance(run, str) or not run.strip():
+            raise PraxisError(f"praxis.toml: checks entry {n} needs run, the check command to use, {example}.")
+        if any(ch in run for ch in CONTROL):
+            raise PraxisError(f"praxis.toml: the run line of checks entry {n} holds a hidden control character "
+                              "(a backslash inside double quotes starts a code in TOML). Use forward slashes, or "
+                              "single quotes.")
+        out.append({"paths": [_clean(p) for p in patterns], "run": run.strip()})
+    return out
+
+
 def _clean(path: str) -> str:
     """A project path from the top, with forward slashes; "" when it is empty or reaches outside the project."""
     parts = [p for p in path.strip().replace("\\", "/").split("/") if p not in ("", ".")]
@@ -400,11 +464,12 @@ def _clean(path: str) -> str:
 _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str,
           "setup": str, "share": list, "after_land": str, "after_done": str, "commit_trailers": list,
-          "env": dict, "exclusive_code": bool, "heavy_jobs": int, "generated": "tables"}
+          "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "generated": "tables",
+          "checks": "tables"}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',
-               bool: "true or false", "tables": 'a list of tables in square brackets, like [{ path = "a.js", ... }]'}
+               bool: "true or false", "jobs": 'a whole number, like 2, or "auto"', "tables": 'a list of tables in square brackets, like [{ path = "a.js", ... }]'}
 
 
 def _typed(name: str, value):
@@ -417,6 +482,8 @@ def _typed(name: str, value):
         ok = isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
     elif kind is bool:
         ok = isinstance(value, bool)
+    elif kind == "jobs":
+        ok = (isinstance(value, int) and not isinstance(value, bool)) or isinstance(value, str)
     elif kind == "tables":
         ok = isinstance(value, list)
     elif kind is int:
