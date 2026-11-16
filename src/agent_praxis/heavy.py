@@ -84,11 +84,12 @@ def _inside_heavy_job(store: Store) -> bool:
 
 
 @contextlib.contextmanager
-def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS):
+def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS, wait: bool = True):
     """Hold a heavy job place for as long as the `with` block runs, waiting in line for it first. Gives
     (the place's row id, its token). Inside a heavy job of this project it takes no place and gives (None, the outer
     job's token): queueing there would hold one place while waiting for another, and two such jobs at the limit
-    would wait for each other forever."""
+    would wait for each other forever. With wait=False it never waits: when no place is free right now it gives
+    (None, None), and the caller does without."""
     store = ctx.store
     if _inside_heavy_job(store):
         ctx.say("Already inside a heavy job: running this command directly, without taking another place.")
@@ -113,6 +114,9 @@ def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS):
             go, ahead = _try_start(store, mine, limit)
             if go:
                 break
+            if not wait:
+                yield None, None
+                return
             if told != len(ahead):
                 told = len(ahead)
                 ctx.say(

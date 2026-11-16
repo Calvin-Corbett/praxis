@@ -190,9 +190,22 @@ def _record_landing(ctx: Ctx, row, summary: str, log: str | None, tip: str) -> N
 
 
 def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> bool:
+    """One agent's turn at the front of the line. With praxis.toml's `speculate`, the check of the next agent in
+    line is started early while this agent's check runs (see early), and stopped again unless this work lands."""
+    from agent_praxis import early
+
+    line = early.Line(ctx, row)
+    try:
+        return _take_turn(ctx, row, folder, progress, finish, line)
+    finally:
+        line.stop()  # still here: the work it was built on did not land (after a landing it was let go, see keep)
+
+
+def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) -> bool:
     main, root = ctx.cfg.main_branch, ctx.repo.root
     main_ref, branch_ref = f"refs/heads/{main}", f"refs/heads/{row['branch']}"
     for _ in range(RETRIES_WHEN_MAIN_MOVES):
+        line.stop()  # a new try builds on a newer main: an early check built on the last try is of no use
         base = gitops.rev(root, main_ref)
         landing_changes: list[str] = []
         # Early, cheap refusal: files the agent changed that now differ from main and that someone else holds.
@@ -230,10 +243,13 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
         named = f" ({which})" if ctx.cfg.checks else ""  # without `checks` it is just "the check", as before
         tree = gitops.git(["rev-parse", "HEAD^{tree}"], folder, check=False).stdout.strip()
         cached = checkcache.passed_at(ctx.store, tree, command) if command and tree else None
+        if cached is None and command and tree:
+            cached = line.wait_for(tree, command)  # its check may have been started early, and still be running
         if cached is not None:
             ctx.say(f"Skipping the check{named}: same tree already passed at "
                     f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cached))} with the same command: {command}")
         elif command:
+            line.start(checked, [row["name"]])  # with `speculate`: the next agent's check starts beside this one
             ctx.say(f"Running the check{named}: {command}")
             code, output, log = _run_check(ctx, row, folder, command)
             _put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
@@ -273,6 +289,8 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
         progress["recorded"] = True
         ctx.say(f"Landed: {row['name']}'s work on \"{row['task']}\" is now in {main} ({summary}).")
         generated.rebuild_after_landing(ctx, row, base, tip)  # still this agent's turn: nobody else moves main
+        if gitops.rev(root, main_ref) == tip:
+            line.keep()  # main is exactly what the early check was built on: let it finish
         hooks.run_after_land(ctx, row, gitops.rev(root, main_ref) or tip)
         _full_check_after(ctx, command, tip)
         if not finish:

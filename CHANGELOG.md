@@ -7,6 +7,14 @@
   test:ui" }, ...]` to `praxis.toml`. For a landing Praxis runs the command of the FIRST entry whose `paths` match
   any file the landing changes, and your normal `check` when none does, so put the strictest entries first. Without
   `checks` nothing changes. The landing output and `praxis status` name the check that was used.
+- **The next agent's check can start early.** With the new `speculate = true` in `praxis.toml` (off by default),
+  while the agent at the front of the landing line runs its check, Praxis starts the check of the next waiting agent
+  beside it, on "main + the front agent's work + its own work" in a scratch folder (`<project>-praxis/_early`). If
+  the front agent lands, the next one finds its files already passed and lands without waiting for a check; if the
+  early run is still going, its turn waits for it rather than running the same check twice. If the front agent does
+  not land, Praxis stops the early run (only the process it started) and forgets it. Nothing ever lands from the
+  scratch folder: a remembered pass in the check cache is the only thing handed over. One early check at a time, and
+  only when a heavy job place is free. `praxis status` shows it, and it logs to `.git/praxis/logs/early-check-*.log`.
 - **A full check that runs every so often, and finds the landing that broke it.** Quick checks are only safe with a
   net behind them. Set `full_check = "<the command that tests the whole project>"` in `praxis.toml`, and
   `full_check_every = N` to have Praxis start it in the background after every N landings that did not run that

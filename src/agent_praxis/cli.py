@@ -113,6 +113,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--in-background", action="store_true", help=argparse.SUPPRESS)  # the background process itself
     s.add_argument("--why", default="", help=argparse.SUPPRESS)
 
+    s = sub.add_parser("early-check")  # no help: the early check's own process, started by a landing (see early)
+    s.add_argument("--candidate", required=True)
+    s.add_argument("--after", type=int, required=True)
+    s.add_argument("--taken", default="")
+
     sub.add_parser("status", help="show who is doing what")
     s = sub.add_parser("launcher", help="register this Praxis with the launcher at ~/.praxis/bin")
     s.add_argument("--switch", action="store_true",
@@ -202,6 +207,9 @@ def run(argv: list[str]) -> int:
         elif cmd == "fullcheck":
             from agent_praxis import fullcheck
             return fullcheck.command_line(ctx, background=args.background, child=args.in_background, why=args.why)
+        elif cmd == "early-check":
+            from agent_praxis import early
+            return early.run_child(ctx, args.candidate, args.after, [name for name in args.taken.split(",") if name])
         elif cmd == "status":
             from agent_praxis import status
             sys.stdout.write(status.render(ctx))

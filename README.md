@@ -313,6 +313,27 @@ Good to know:
   that it could not judge the main version and blames no landing.
 - A full check that sometimes fails by itself will sometimes blame a landing wrongly. Keep it deterministic.
 
+### Early checks for the line
+
+Off by default. With `speculate = true` in `praxis.toml`, the agent behind the one that is landing does not just
+wait: while the front agent's check runs, Praxis starts the next agent's check early, beside it. It builds "the
+newest main version + the front agent's work + the next agent's work" in a scratch folder of its own
+(`<project>-praxis/_early`) and runs the next agent's check there.
+
+- If the front agent lands, the next agent's turn builds exactly the same files, sees that they already passed
+  ("Skipping the check: same tree already passed"), and lands without waiting for a check. If the early run is
+  still going, its turn waits for it instead of running the same check twice.
+- If the front agent does not land, Praxis stops the early run (only the process it started for it) and forgets
+  it. The next agent's check then runs on its own turn, as always.
+
+Nothing ever lands from the scratch folder. The only thing an early check leaves behind is a remembered pass in the
+check cache, for exactly the files and the command it ran, and a failure is never remembered. It is bounded: one
+early check at a time, only for the first waiting agent that the front agent's batch did not take (`batch_max` was
+reached, or batching is off), and only when a heavy job place is free at that moment (it takes one, and never waits
+for one). If that agent's work clashes with the work that is landing, there is nothing to check early: it is told
+about the clash on its own turn, as always. It trades CPU for waiting time, so leave it off on a busy machine.
+`praxis status` shows a running early check, and its output goes to `.git/praxis/logs/early-check-*.log`.
+
 ### Exit codes
 
 The check command tells Praxis what happened by its exit code:
@@ -374,6 +395,10 @@ entries that must always win first. Patterns are read from the top of the projec
 after how many landings Praxis runs it on the main version by itself (see "The full check" above). `0` means only
 when you run `praxis fullcheck`. `full_check_every` above 0 with an empty `full_check` is refused, so you never
 believe in a safety net that is not there.
+
+**`speculate`** (default `false`): start the next waiting agent's check early, while the check of the agent at the
+front of the landing line runs (see "Early checks for the line" above). One at a time, and only when a heavy job
+place is free.
 
 **The check cache.** When the exact files that would land (the git tree of the candidate) already passed the same
 check command, Praxis does not run the check again and says "Skipping the check: same tree already passed at
@@ -637,6 +662,7 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import
   copies of your project). Change this with `worktree_root` in praxis.toml.
 - Each agent works on its own git branch, `praxis/<name>` (`branch_prefix` in praxis.toml changes the start).
+- The early checks' scratch folder (with `speculate = true`): `<project>-praxis/_early`, on no branch.
 - The full check's scratch folder: `<project>-praxis/_fullcheck`, on no branch. Its runs are recorded in the
   database (format 5), and their output is in `.git/praxis/logs/full-check-*.log`.
 - The check cache (the newest 200 passes) and the heavy job queue are in the same database; each job's output goes to `.git/praxis/logs/<agent>-heavy-<time>.log`.

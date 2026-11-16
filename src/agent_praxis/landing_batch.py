@@ -333,6 +333,9 @@ class _Run:
         self.size = len(marker["members"])
         self.last_landed: str | None = None
         self.used = ""  # the check command the newest candidate was checked with
+        from agent_praxis import early
+
+        self.line = early.Line(ctx, head.row)  # with `speculate`: the early check of the next agent in line
 
     # building the candidate --------------------------------------------------------------------------------------
 
@@ -409,6 +412,7 @@ class _Run:
         from agent_praxis import landing as L
 
         ctx, folder = self.ctx, self.folder
+        self.line.stop()  # a new candidate: an early check built on the last one is of no use
         command = ctx.cfg.check_for(gitops.changed_between(folder, base, "HEAD"))[0].strip()
         self.used = command
         if not command:
@@ -418,6 +422,7 @@ class _Run:
         if tree and checkcache.passed_at(ctx.store, tree, command) is not None:
             ctx.say("Skipping the check: the same files already passed the same command.")
             return 0, "", None
+        self.line.start(checked, [m.name for m in built])  # the next agent's check starts beside this one
         ctx.say(f"Running the check once for {len(built)} agent(s) ({', '.join(m.name for m in built)}): {command}")
         code, output, log = L._run_check(ctx, self.head.row, folder, command)
         L._put_back_check_rewrites(ctx, self.head.row, folder)
@@ -452,6 +457,7 @@ class _Run:
                 self.head.outcome = "refused"
                 raise Abort
             if code != 0:
+                self.line.stop()
                 self.failed[tree] = (code, output, log)
                 if len(built) == 1:
                     self._refuse(built[0], output, log, alone=self.size == 1)
@@ -562,6 +568,8 @@ class _Run:
             m.ctx.say(f'Landed: {m.name}\'s work on "{m.row["task"]}" is now in {main} ({summary}).')
         generated.rebuild_after_landing(ctx, built[0].row, base, tip)  # still the head's turn: nobody else moves main
         final = gitops.rev(self.root, self.main_ref) or tip
+        if final == tip:
+            self.line.keep()  # main is exactly what the early check was built on: let it finish
         for m in built:
             hooks.run_after_land(m.ctx, m.row, final)
         L._full_check_after(ctx, self.used, tip)
@@ -575,6 +583,7 @@ class _Run:
         """Put the head's folder back on its branch (and level with main when its work landed). The marker goes
         once that is done; if it cannot be done, it stays, and the head's next landing does it."""
         ctx, folder, head = self.ctx, self.folder, self.head
+        self.line.stop()  # still here: the candidate it was built on did not land
         branch = head.row["branch"]
         if gitops.operation_in_progress(folder):
             gitops.abort_operation(folder)

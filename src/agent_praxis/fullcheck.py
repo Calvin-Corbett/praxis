@@ -61,6 +61,21 @@ def running(store) -> bool:
     return held(_lock_path(store))
 
 
+def take_lock(path: Path, tries: int = 5):
+    """Open the file at *path* and lock it for this process: the open file, or None when another process keeps it
+    locked. A process that only looks whether it is locked (`held`) locks it for an instant too, so a refusal is
+    tried again a few times before it counts."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(tries):
+        handle = open(path, "a+b")  # noqa: SIM115 - the caller keeps it open, and locked, for its whole run
+        if _try_lock(handle):
+            return handle
+        handle.close()
+        if attempt + 1 < tries:
+            time.sleep(0.1)
+    return None
+
+
 def newest(store, cmd: str, results: tuple[str, ...] | None = None):
     """The newest run of exactly this command, or the newest with one of *results*. None when there is none."""
     if results is None:
@@ -235,13 +250,10 @@ def run(ctx: Ctx, why: str = ASKED, auto: bool = False) -> int:
     """Run the full check on the main version now. 0 when it passed, 2 when it did not. With *auto* (the background
     process): give way to a run already going, and run again while landings that are due keep arriving."""
     store, cmd = ctx.store, command(ctx.cfg)
-    path = _lock_path(store)
-    path.parent.mkdir(parents=True, exist_ok=True)
     while True:
-        handle = open(path, "a+b")  # noqa: SIM115 - held open, and locked, for the whole run
-        if _try_lock(handle):
+        handle = take_lock(_lock_path(store))
+        if handle is not None:
             break
-        handle.close()
         if auto:
             ctx.say("A full check is already running, so this one is not needed.")
             return 0
@@ -336,7 +348,7 @@ def _scratch(ctx: Ctx, commit: str, name: str = SCRATCH) -> Path:
         log = hooks.new_log(ctx.store.dir / "logs", "full-check-setup")
         ctx.say(f"Running the setup command in Praxis's scratch folder {folder}: {setup}")
         env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=WHO["name"], PRAXIS_TASK=WHO["task"])
-        code = hooks.run_logged(setup, folder, env, log)
+        code = hooks.run_logged(setup, folder, env, log, ctx)
         if code != 0:
             raise PraxisError(
                 f"The setup command failed in Praxis's scratch folder {folder} (exit code {code}), so the check "

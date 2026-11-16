@@ -153,6 +153,7 @@ def render(ctx: Ctx) -> str:
 
     out += _checks_lines(ctx)
     out += _full_check_lines(ctx, now)
+    out += _early_lines(ctx, now)
     out += _heavy_lines(ctx, now)
 
     out.append("LANDING LINE" if line else "LANDING LINE: empty")
@@ -238,6 +239,18 @@ def _full_check_lines(ctx, now: float) -> list[str]:
         out.append(f"  - FAILING since {ago(judged['ended'] or judged['started'], now)} on commit "
                    f"{fullcheck.short(judged['commit_id'])} (see NEEDS YOU above); {since} landing(s) since")
     return [*out, ""]
+
+
+def _early_lines(ctx, now: float) -> list[str]:
+    from agent_praxis import early
+
+    state = early.active(ctx.store)
+    if not state:
+        return []
+    started = ago(state.get("started", now), now)
+    line = (f"EARLY CHECK: {state['agent']}'s check is running early (started {started}), on top of the work that is "
+            "landing now. Only a pass is remembered; nothing lands from it.")
+    return [line, ""]
 
 
 def _heavy_lines(ctx, now: float) -> list[str]:

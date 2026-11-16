@@ -57,6 +57,7 @@ class Config:
     checks: list[dict] = field(default_factory=list)
     full_check: str = ""  # the command that proves the WHOLE project works: the safety net behind `checks`
     full_check_every: int = 0  # run it after this many landings that did not run it themselves; 0: only on demand
+    speculate: bool = False  # start the next waiting agent's check early, while the head's check runs
 
     def check_for(self, changed: list[str]) -> tuple[str, str]:
         """(the check command, its name) for a landing that changes the files *changed*: the command of the FIRST
@@ -174,6 +175,13 @@ batch_max = {cfg.batch_max}
 # with the exact `git revert` command. Praxis never undoes a landing by itself.
 full_check = {_q(cfg.full_check)}
 full_check_every = {cfg.full_check_every}
+
+# Early checks. With true, while the agent at the front of the landing line runs its check, Praxis starts the
+# check of the next waiting agent early, beside it, on "main + the front agent's work + its own work" in a scratch
+# folder. If the front agent lands, the next one finds its files already passed and lands without waiting for a
+# check; if not, the early run is stopped and forgotten. It uses more CPU to save waiting: one early check at a
+# time, and only when a heavy job place (heavy_jobs above) is free.
+speculate = {"true" if cfg.speculate else "false"}
 
 # Files a command makes from other files. Nobody claims or edits them: after each landing that changes one
 # of the `from` files, Praxis runs the command in the main folder and commits the new file, for example
@@ -503,7 +511,8 @@ _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": 
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str, "shell_fix": bool,
           "setup": str, "share": list, "after_land": str, "after_done": str, "commit_trailers": list,
           "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
-          "generated": "tables", "checks": "tables", "full_check": str, "full_check_every": int}
+          "generated": "tables", "checks": "tables", "full_check": str, "full_check_every": int,
+          "speculate": bool}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',
