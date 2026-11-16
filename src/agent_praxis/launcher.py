@@ -84,7 +84,7 @@ def known_installs(home: Path, here_python: str | None = None, here_version: str
     running now counts as the most recent of all.
     """
     registered = _registered(home, here_python, here_version)
-    return sorted(reversed(registered), key=lambda i: version_key(i["version"]), reverse=True)
+    return sorted(registered[::-1], key=lambda i: version_key(i["version"]), reverse=True)
 
 
 def _sh(pythons: list[str]) -> str:
