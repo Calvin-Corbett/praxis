@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+test = ["pytest>=7", "pytest-xdist>=3"]
 
 [project.scripts]
 praxis = "agent_praxis.cli:main"

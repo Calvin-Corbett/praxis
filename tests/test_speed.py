@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import SRC, edit, folder, git, praxis, praxis_process
+from conftest import edit, folder, git, praxis
 
 from agent_praxis import agents, gitops, landing
 
@@ -57,16 +57,6 @@ def test_status_reads_a_folder_with_no_commit_yet_like_before(project):
     assert code == 0 and "alice (working)" in out and "could not read" not in out, out
 
 
-def test_praxis_refuses_to_run_outside_the_test_temp_area(project, monkeypatch):
-    monkeypatch.chdir(SRC)  # the real Praxis source: never a place for a test's praxis command
-    with pytest.raises(pytest.fail.Exception, match="outside pytest's temp area"):
-        praxis("status")
-    with pytest.raises(pytest.fail.Exception, match="outside pytest's temp area"):
-        praxis_process(SRC, "status")
-    monkeypatch.chdir(project)
-    assert praxis("status")[0] == 0
-
-
 def test_start_writes_files_with_parallel_workers_and_leaves_the_folder_clean(project, monkeypatch):
     for i in range(150):  # more files than git's threshold for parallel checkout (100)
         edit(project / "scripts" / "gen" / f"gen{i}.gd", f"extends Node\nvar n = {i}\n" * 20)
@@ -85,10 +75,11 @@ def test_start_writes_files_with_parallel_workers_and_leaves_the_folder_clean(pr
 def test_a_long_check_says_it_is_still_running(project, monkeypatch, tmp_path):
     monkeypatch.setattr(landing, "HEARTBEAT_SECONDS", 0.3)
     slow = tmp_path / "slow check.py"
-    slow.write_text("import time\nprint('compiling level 1', flush=True)\nprint('', flush=True)\n"
-                    "time.sleep(2)\nprint('done')\n")
+    slow.write_text(
+        "import time\nprint('compiling level 1', flush=True)\nprint('', flush=True)\ntime.sleep(2)\nprint('done')\n"
+    )
     cfg = project / "praxis.toml"
-    line = f"check = '\"{sys.executable}\" \"{slow}\"'"
+    line = f'check = \'"{sys.executable}" "{slow}"\''
     cfg.write_text(re.sub(r"(?m)^check = .*$", lambda _m: line, cfg.read_text()))
     praxis("start", "alice", "jump", "scripts/player.gd")
     edit(folder(project, "alice") / "scripts" / "player.gd", "extends Node\nvar speed = 11\n")

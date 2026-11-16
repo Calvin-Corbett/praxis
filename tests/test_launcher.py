@@ -10,16 +10,15 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import SRC, praxis
+from conftest import child_env, praxis
 
 from agent_praxis import launcher, store
 
 
 @pytest.fixture
 def home(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("PRAXIS_HOME", str(tmp_path / "praxis home"))
-    monkeypatch.chdir(tmp_path)  # praxis commands run only inside pytest's temp area
-    return tmp_path / "praxis home"
+    monkeypatch.chdir(tmp_path)  # praxis commands run only inside the test's own temporary folder
+    return Path(os.environ["PRAXIS_HOME"])  # conftest points it inside tmp_path for every test
 
 
 def _launcher_file(home: Path) -> Path:
@@ -40,9 +39,8 @@ def _fake_python(folder: Path, word: str) -> Path:
 
 
 def _run(home: Path, *args: str, **kw) -> subprocess.CompletedProcess:
-    env = dict(os.environ, PYTHONPATH=str(SRC), PRAXIS_HOME=str(home))
     cmd = [str(_launcher_file(home)), *args]
-    return subprocess.run(cmd, check=False, capture_output=True, text=True, env=env, **kw)
+    return subprocess.run(cmd, check=False, capture_output=True, text=True, env=child_env(PRAXIS_HOME=str(home)), **kw)
 
 
 def _registry(home: Path, *items: tuple[str, Path]) -> None:

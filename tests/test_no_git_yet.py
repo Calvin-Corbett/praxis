@@ -20,7 +20,6 @@ def plain_git(tmp_path_factory, monkeypatch):
     cfg.write_text("[core]\n\tautocrlf = true\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
     monkeypatch.setattr(newgit, "_git_lfs_works", lambda here: False)  # the LFS test below turns it back on
 
 
@@ -73,18 +72,28 @@ def test_plain_godot_folder_becomes_a_git_project_without_touching_a_file(tmp_pa
     assert "notes.log" not in saved
     assert git(root, "status", "--porcelain") == ""
     assert git(root, "config", "core.autocrlf") == "false"
-    for text in ("Created: .git, .gitignore.", "Saved 7 files", "Git leaves out: .godot/", "backup",
-                 "Git LFS is not installed", "saves/ looks like player saves", "Line endings are kept"):
+    for text in (
+        "Created: .git, .gitignore.",
+        "Saved 7 files",
+        "Git leaves out: .godot/",
+        "backup",
+        "Git LFS is not installed",
+        "saves/ looks like player saves",
+        "Line endings are kept",
+    ):
         assert text in out, out
 
 
 def test_line_endings_stay_byte_exact_in_the_commit_and_in_agent_folders(tmp_path, monkeypatch):
-    root = make(tmp_path / "web game", {
-        "package.json": json.dumps({"name": "g"}),
-        "src/crlf.js": b"let a = 1;\r\nlet b = 2;\r\n",
-        "src/lf.js": b"let a = 1;\nlet b = 2;\n",
-        "src/mixed.txt": b"one\r\ntwo\nthree\r\n",
-    })
+    root = make(
+        tmp_path / "web game",
+        {
+            "package.json": json.dumps({"name": "g"}),
+            "src/crlf.js": b"let a = 1;\r\nlet b = 2;\r\n",
+            "src/lf.js": b"let a = 1;\nlet b = 2;\n",
+            "src/mixed.txt": b"one\r\ntwo\nthree\r\n",
+        },
+    )
     monkeypatch.chdir(root)
     code, out = praxis("init", "--check", "")
     assert code == 0, out
@@ -101,14 +110,17 @@ def test_line_endings_stay_byte_exact_in_the_commit_and_in_agent_folders(tmp_pat
 
 def test_web_ignores_match_nested_folders_and_only_committed_big_files_are_warned(tmp_path, monkeypatch):
     monkeypatch.setattr(newgit, "BIG_FILE", 1000)
-    root = make(tmp_path / "game", {
-        "package.json": "{}",
-        "node_modules/electron/dist/electron.exe": b"x" * 5000,
-        "app/node_modules/x/index.js": "x",
-        "app/dist/out.js": "x",
-        "assets/music.ogg": b"m" * 3000,
-        "main.js": "x",
-    })
+    root = make(
+        tmp_path / "game",
+        {
+            "package.json": "{}",
+            "node_modules/electron/dist/electron.exe": b"x" * 5000,
+            "app/node_modules/x/index.js": "x",
+            "app/dist/out.js": "x",
+            "assets/music.ogg": b"m" * 3000,
+            "main.js": "x",
+        },
+    )
     monkeypatch.chdir(root)
     code, out = praxis("init", "--check", "")
     assert code == 0, out
@@ -119,8 +131,15 @@ def test_web_ignores_match_nested_folders_and_only_committed_big_files_are_warne
 
 def test_an_existing_gitignore_is_kept_byte_for_byte(tmp_path, monkeypatch):
     mine = b"# mine\r\ncache/\r\n"
-    root = make(tmp_path / "game", {"project.godot": "", ".gitignore": mine, "cache/big.bin": b"c" * 100,
-                                    ".godot/x": "kept because my .gitignore does not list it"})
+    root = make(
+        tmp_path / "game",
+        {
+            "project.godot": "",
+            ".gitignore": mine,
+            "cache/big.bin": b"c" * 100,
+            ".godot/x": "kept because my .gitignore does not list it",
+        },
+    )
     monkeypatch.chdir(root)
     code, out = praxis("init")
     assert code == 0, out
@@ -178,7 +197,10 @@ def test_no_commit_sets_git_up_but_saves_nothing(tmp_path, monkeypatch):
     code, out = praxis("init", "--no-commit")
     assert code == 0, out
     assert (root / ".git").is_dir() and "git add -A" in out
-    assert subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=root, capture_output=True, check=False).returncode != 0
+    assert (
+        subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=root, capture_output=True, check=False).returncode
+        != 0
+    )
 
 
 def _real_lfs() -> bool:
@@ -191,8 +213,9 @@ def _real_lfs() -> bool:
 @pytest.mark.skipif(not _real_lfs(), reason="git-lfs is not installed")
 def test_with_git_lfs_big_binary_types_are_kept_in_lfs(tmp_path, monkeypatch):
     monkeypatch.setattr(newgit, "_git_lfs_works", lambda here: True)  # undo the fixture: the real git-lfs runs
-    root = make(tmp_path / "game", {"project.godot": "", "art/Hero.PNG": b"\x89PNG" + b"p" * 200,
-                                    "scripts/a.gd": "x\r\n"})
+    root = make(
+        tmp_path / "game", {"project.godot": "", "art/Hero.PNG": b"\x89PNG" + b"p" * 200, "scripts/a.gd": "x\r\n"}
+    )
     before = snapshot(root)
     monkeypatch.chdir(root)
     code, out = praxis("init")
@@ -200,8 +223,9 @@ def test_with_git_lfs_big_binary_types_are_kept_in_lfs(tmp_path, monkeypatch):
     attrs = (root / ".gitattributes").read_text()
     assert "filter=lfs" in attrs and "text=auto" not in attrs and "-text" in attrs
     assert "lfs" in git(root, "check-attr", "filter", "art/Hero.PNG")
-    pointer = subprocess.run(["git", "cat-file", "-p", "HEAD:art/Hero.PNG"], cwd=root, capture_output=True, check=True).stdout
+    pointer = subprocess.run(
+        ["git", "cat-file", "-p", "HEAD:art/Hero.PNG"], cwd=root, capture_output=True, check=True
+    ).stdout
     assert pointer.startswith(b"version https://git-lfs"), "the picture was not stored in LFS"
     after = snapshot(root)
     assert all(after[name] == data for name, data in before.items())
-

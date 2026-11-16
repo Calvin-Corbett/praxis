@@ -21,8 +21,9 @@ from agent_praxis.store import Store
 def _exclusive_code(project: Path) -> None:
     """The old rule, one agent per code file, kept behind exclusive_code = true."""
     cfg = project / "praxis.toml"
-    cfg.write_text(cfg.read_text(encoding="utf-8").replace("exclusive_code = false", "exclusive_code = true"),
-                   encoding="utf-8")
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8").replace("exclusive_code = false", "exclusive_code = true"), encoding="utf-8"
+    )
     git(project, "commit", "-qam", "exclusive_code = true")
 
 
@@ -96,15 +97,20 @@ def test_done_from_inside_the_agents_own_folder_explains_and_changes_nothing(pro
 def test_done_refuses_while_another_program_is_using_the_folder(project):
     praxis("start", "alice", "jump", "scripts/player.gd")
     wt = folder(project, "alice")
-    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=str(wt))
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"],
+        cwd=str(wt),
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     try:
-        time.sleep(0.5)
+        assert holder.stdout.readline().strip() == "ready"  # it is running in the folder: no guessing how long
         code, out = praxis("done", "alice")
         assert code == 1 and "Another program is using" in out
         assert (wt / ".git").exists() and (wt / "scripts" / "player.gd").is_file(), "nothing was touched"
     finally:
         holder.kill()
-        holder.wait()
+        holder.communicate()  # waits, and closes its pipe
     assert praxis("done", "alice")[0] == 0
 
 
@@ -153,7 +159,9 @@ def test_abandon_never_commits_into_a_project_that_contains_the_agent_folder(tmp
     before = git(outer, "rev-parse", "HEAD")
     for command in ("land", "done", "abandon"):
         code, out = praxis(command, "alice")
-        assert code == 1 and "does not see it as a working folder of this project" in out and "worktree repair" in out, (command, out)
+        assert (
+            code == 1 and "does not see it as a working folder of this project" in out and "worktree repair" in out
+        ), (command, out)
     assert git(outer, "rev-parse", "HEAD") == before, "nothing was committed in the outer project"
     assert (outer / "notes.txt").read_text() == "my unsaved edit\n"
     assert praxis("status")[0] == 0
@@ -251,8 +259,9 @@ def test_a_check_that_waits_for_a_key_does_not_hold_the_line(project):
 
 
 def test_a_huge_check_output_is_logged_without_filling_memory(project):
-    (project / "loud.py").write_text("import sys\nfor i in range(200000): print('line', i, 'é')\nsys.exit(1)\n",
-                                     encoding="utf-8")
+    (project / "loud.py").write_text(
+        "import sys\nfor i in range(200000): print('line', i, 'é')\nsys.exit(1)\n", encoding="utf-8"
+    )
     _set_check(project, "loud.py")
     praxis("start", "alice", "jump", "scripts/player.gd")
     edit(folder(project, "alice") / "scripts" / "player.gd", "extends Node\nvar speed = 11\n")
@@ -350,6 +359,7 @@ def test_start_says_when_a_claimed_file_was_never_committed(project):
 def test_problems_in_the_main_folder_never_pause_an_agent():
     def row(kind):
         return {"ok": 0, "kind": kind, "problems": None, "signature": "same", "summary": kind}
+
     assert enough.should_pause([row("check")] * 3, 3)
     assert enough.should_pause([row("main-folder")] * 5, 3) is None
 
@@ -372,8 +382,10 @@ def test_status_shows_a_stopped_landing_as_stopped(project):
     store = Store(project / ".git" / "praxis")
     try:
         with store.write() as db:
-            db.execute("INSERT INTO queue (agent, token, enqueued, started) VALUES ('alice', 'dead', ?, ?)",
-                       (time.time(), time.time()))
+            db.execute(
+                "INSERT INTO queue (agent, token, enqueued, started) VALUES ('alice', 'dead', ?, ?)",
+                (time.time(), time.time()),
+            )
     finally:
         store.close()
     code, out = praxis("status")
@@ -409,6 +421,7 @@ def test_a_project_that_commits_a_symlink_is_removed_without_forcing(project, tm
 
 def test_only_symlinks_and_junctions_count_as_links(tmp_path):
     from agent_praxis.agents import _is_link
+
     plain = tmp_path / "plain"
     plain.mkdir()
     (tmp_path / "file.txt").write_text("x")
@@ -421,6 +434,7 @@ def test_only_symlinks_and_junctions_count_as_links(tmp_path):
 
 def test_check_output_with_a_stray_bad_byte_keeps_its_accents():
     from agent_praxis.landing import _decode
+
     assert _decode("Größe é ü".encode() + bytes([0xFF]) + b" fin").startswith("Größe é ü")
     if os.name == "nt" and "1252" in __import__("locale").getpreferredencoding(False):
         assert "�" not in _decode("café ".encode("cp1252") * 50)  # a Windows code page tool's output
@@ -456,20 +470,25 @@ def test_done_refuses_while_a_file_in_the_folder_is_open(project):
     praxis("start", "alice", "jump", "scripts/player.gd")
     wt = folder(project, "alice")
     target = wt / "scripts" / "enemy.gd"
-    holder = subprocess.Popen([sys.executable, "-c", f"f = open(r'{target}'); import time; time.sleep(60)"])
+    holder = subprocess.Popen(
+        [sys.executable, "-c", f"f = open(r'{target}'); print('ready', flush=True); import time; time.sleep(60)"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     try:
-        time.sleep(1)
+        assert holder.stdout.readline().strip() == "ready"  # the file is open now, however busy the machine is
         code, out = praxis("done", "alice")
         assert code == 1 and "Another program is using" in out and "enemy.gd" in out, out
         assert (wt / ".git").exists() and target.is_file(), "nothing was touched"
     finally:
         holder.kill()
-        holder.wait()
+        holder.communicate()  # waits, and closes its pipe
     assert praxis("done", "alice")[0] == 0
 
 
 def test_a_removal_cut_short_is_explained_not_called_foreign(project, monkeypatch):
     from agent_praxis import gitops
+
     praxis("start", "alice", "jump", "scripts/player.gd")
     wt = folder(project, "alice")
     real = gitops.git
@@ -516,8 +535,10 @@ def test_status_does_not_claim_a_stopped_landing_landed_nothing(project):
     store = Store(project / ".git" / "praxis")
     try:
         with store.write() as db:
-            db.execute("INSERT INTO queue (agent, token, enqueued, started) VALUES ('alice', 'dead', ?, ?)",
-                       (time.time(), time.time()))
+            db.execute(
+                "INSERT INTO queue (agent, token, enqueued, started) VALUES ('alice', 'dead', ?, ?)",
+                (time.time(), time.time()),
+            )
     finally:
         store.close()
     code, out = praxis("status")
@@ -545,6 +566,7 @@ def test_joining_commits_never_leaves_the_folder_off_its_branch(project, monkeyp
     """A landing killed during the joined try used to leave the folder detached, and land/done then said the
     work had gone separate ways. The joined try now runs on the agent's own branch the whole time."""
     from agent_praxis import gitops
+
     wt = _two_steps_that_clash_only_one_at_a_time(project)
     seen = []
     real = gitops.git
@@ -654,25 +676,30 @@ def test_a_helper_the_check_leaves_running_survives_a_normal_landing(project):
 
 @pytest.mark.skipif(os.name != "nt", reason="the check stops with a killed landing on Windows")
 def test_a_check_stops_when_its_landing_is_killed(project):
-    started, late = project.parent / "check-started.txt", project.parent / "check-late.txt"
+    # The check adds to a file ten times a second for as long as it lives. No deadline to race against: however
+    # busy the machine is, a check that stopped adds nothing more, and one that is still running keeps adding.
+    beats = project.parent / "check-beats.txt"
     (project / "slow.py").write_text(
-        "import pathlib, time\n"
-        f"pathlib.Path(r'{started}').write_text('x')\n"
-        f"time.sleep(6)\npathlib.Path(r'{late}').write_text('still running')\n"
+        f"import time\nfor _ in range(900):\n    open(r'{beats}', 'a').write('x')\n    time.sleep(0.1)\n"
     )
     _set_check(project, "slow.py")
     praxis("start", "alice", "jump", "scripts/player.gd")
     edit(folder(project, "alice") / "scripts" / "player.gd", "extends Node\nvar speed = 11\n")
     proc = praxis_process(project, "land", "alice")
-    for _ in range(120):
-        if started.exists():
+    for _ in range(240):
+        if beats.exists():
             break
         time.sleep(0.5)
-    assert started.exists()
+    assert beats.exists(), "the check never started"
     subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
     proc.wait()
-    time.sleep(9)
-    assert not late.exists(), "the check kept running after its landing was killed"
+    proc.stdout.close()  # not communicate(): a check that lived on could hold the pipe open and be waited for
+    size, quiet_since, give_up = beats.stat().st_size, time.time(), time.time() + 60
+    while time.time() - quiet_since < 3 and time.time() < give_up:
+        time.sleep(0.2)
+        if beats.stat().st_size != size:
+            size, quiet_since = beats.stat().st_size, time.time()
+    assert time.time() - quiet_since >= 3, "the check kept running after its landing was killed"
 
 
 def test_init_will_not_take_over_a_bigger_project_around_a_code_folder(tmp_path, monkeypatch):

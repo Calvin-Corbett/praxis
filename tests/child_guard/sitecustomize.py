@@ -1,0 +1,44 @@
+"""Stops a test's child process from running a praxis command outside that test's own temporary folder.
+
+conftest.py puts this folder on PYTHONPATH for every test, so every Python a test starts (directly, through a
+shell, through a check command, through praxis itself) loads this file first. It does nothing unless the process
+is `python -m agent_praxis ...`; then it ends the process at once when the current folder is not inside the folder
+named by PRAXIS_TEST_AREA. conftest.py does the same for commands run inside the test process.
+"""
+
+import itertools
+import os
+import sys
+
+EXIT_CODE = 97  # no praxis command ends with this code, so a test that sees it knows the guard spoke
+
+
+def _is_praxis_command(args: list[str]) -> bool:
+    return any(a == "-m" and b == "agent_praxis" for a, b in itertools.pairwise(args))
+
+
+def _inside(here: str, top: str) -> bool:
+    here, top = (os.path.normcase(os.path.realpath(p)) for p in (here, top))
+    return here == top or here.startswith(top.rstrip("\\/") + os.sep)
+
+
+def _guard() -> None:
+    area = os.environ.get("PRAXIS_TEST_AREA")
+    args = list(getattr(sys, "orig_argv", []))
+    if not area or not _is_praxis_command(args):
+        return
+    try:
+        here = os.getcwd()
+    except OSError:
+        here = "(a folder that no longer exists)"
+    if os.path.isdir(here) and _inside(here, area):
+        return
+    sys.stderr.write(
+        f"refused to run `praxis {' '.join(args[args.index('agent_praxis') + 1 :])}` in {here}: that is outside "
+        f"this test's temporary folder ({area}). Tests run praxis only in their own temporary projects.\n"
+    )
+    sys.stderr.flush()
+    os._exit(EXIT_CODE)
+
+
+_guard()

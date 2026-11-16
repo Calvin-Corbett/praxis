@@ -82,6 +82,13 @@
   wins, then the one registered most recently. A lower version still always loses to a higher one.
 - The project database is now format 3 (a new table for the heavy jobs). Praxis upgrades it by itself the first time
   it runs; an older Praxis then refuses the project instead of guessing.
+- **Praxis's own tests run across CPU cores.** `pip install ".[test]"` now also installs pytest-xdist, and
+  `python -m pytest -n auto` runs the suite with a worker for half the CPU cores (8 on a PC with 16) instead of one
+  test at a time: a 33-minute run took under 6 minutes on a busy 16-core Windows PC. Plain `python -m pytest` still
+  works. To make that safe every test now stands alone: a praxis command runs only inside the test's own temporary
+  folder (child processes included), `PRAXIS_HOME` and git's global settings are the test's own, and settings left
+  in the environment by whoever started the tests (`PRAXIS_AGENT`, `GIT_DIR`) are cleared. The tests no longer sign
+  their commits with your key or read your `~/.praxis`.
 
 ## 0.4.0
 
