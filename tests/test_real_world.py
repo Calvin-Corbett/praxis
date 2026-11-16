@@ -18,6 +18,14 @@ from agent_praxis.landing_queue import Ticket
 from agent_praxis.store import Store
 
 
+def _exclusive_code(project: Path) -> None:
+    """The old rule, one agent per code file, kept behind exclusive_code = true."""
+    cfg = project / "praxis.toml"
+    cfg.write_text(cfg.read_text(encoding="utf-8").replace("exclusive_code = false", "exclusive_code = true"),
+                   encoding="utf-8")
+    git(project, "commit", "-qam", "exclusive_code = true")
+
+
 def _set_check(project: Path, script: str) -> None:
     cfg = project / "praxis.toml"
     line = f"check = '\"{sys.executable}\" {script}'"  # single quotes: a TOML string with no escapes
@@ -27,8 +35,9 @@ def _set_check(project: Path, script: str) -> None:
 
 
 def test_an_agent_cannot_undo_another_agents_landed_change(project):
-    """The review's steps: bob edits a file alice holds (far from alice's line), is refused, then puts the file
+    """With exclusive_code = true. The review's steps: bob edits a file alice holds (far from alice's line), is refused, then puts the file
     back to how it was when bob started. Rebased onto alice's landing, that second commit undoes alice's work."""
+    _exclusive_code(project)
     lines = ["extends Node", "var speed = 10"] + [f"# {n}" for n in range(20)] + ["var jump = 1"]
     edit(project / "scripts" / "player.gd", "\n".join(lines) + "\n")
     git(project, "commit", "-qam", "a longer player script")
@@ -373,6 +382,7 @@ def test_status_shows_a_stopped_landing_as_stopped(project):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows spellings")
 def test_windows_spellings_of_a_held_file_are_the_same_file(project):
+    _exclusive_code(project)
     praxis("start", "alice", "jump", "scripts/player.gd")
     praxis("start", "bob", "other", "scripts/enemy.gd")
     code, out = praxis("claim", "bob", "scripts/player.gd.")
