@@ -29,6 +29,9 @@
   naming both, and print the two `git config` lines that set the project's identity.
 
 ### Changed
+- **The launcher runs the install you ran it from.** When two installs had the same version, `praxis launcher` could
+  write a launcher that ran the older install. Now, among equal versions, the install you ran `praxis launcher` from
+  wins, then the one registered most recently. A lower version still always loses to a higher one.
 - The project database is now format 3 (a new table for the heavy jobs). Praxis upgrades it by itself the first time
   it runs; an older Praxis then refuses the project instead of guessing.
 

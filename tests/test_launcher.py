@@ -82,6 +82,40 @@ def test_running_it_from_an_older_version_never_makes_the_launcher_older(home, t
     assert _run(home).stdout.startswith("NEW")
 
 
+def _order(home: Path) -> list[str]:
+    return [i["python"] for i in launcher.known_installs(home, here_python=str(home / "none"), here_version="0.0.1")]
+
+
+def test_equal_versions_the_one_you_run_it_from_goes_first(home, tmp_path, monkeypatch):
+    first = _fake_python(tmp_path / "first", "FIRST")
+    second = _fake_python(tmp_path / "second", "SECOND")
+    _registry(home, ("0.4.0", first))
+    monkeypatch.setattr(launcher, "__version__", "0.4.0")
+    monkeypatch.setattr(sys, "executable", str(second))
+    praxis("launcher")
+    assert _run(home).stdout.startswith("SECOND")
+    assert [i["python"] for i in json.loads((home / "installs.json").read_text())] == [str(first), str(second)]
+    monkeypatch.setattr(sys, "executable", str(first))  # now run from the first install: it is the most recent
+    praxis("launcher")
+    assert _run(home).stdout.startswith("FIRST")
+    assert [i["python"] for i in json.loads((home / "installs.json").read_text())] == [str(second), str(first)]
+
+
+def test_equal_versions_the_most_recently_registered_wins(home, tmp_path):
+    a, b, c = (_fake_python(tmp_path / n, n) for n in "abc")
+    _registry(home, ("0.4.0", a), ("0.4.0", b), ("0.4.0", c))
+    assert _order(home) == [str(c), str(b), str(a)]
+
+
+def test_a_lower_version_loses_to_a_higher_one_whatever_the_order(home, tmp_path):
+    low = _fake_python(tmp_path / "low", "LOW")
+    high = _fake_python(tmp_path / "high", "HIGH")
+    _registry(home, ("0.10.0", high), ("0.9.0", low))  # the lower one registered last
+    assert _order(home) == [str(high), str(low)]
+    _registry(home, ("0.9.0", low), ("0.10.0", high))
+    assert _order(home) == [str(high), str(low)]
+
+
 def test_a_removed_version_is_skipped_and_the_next_newest_runs(home, tmp_path):
     kept = _fake_python(tmp_path / "kept", "KEPT")
     gone = _fake_python(tmp_path / "gone", "GONE")

@@ -59,17 +59,32 @@ def _write_atomic(path: Path, text: str, executable: bool = False, newline: str 
     os.replace(temp, path)
 
 
-def known_installs(home: Path, here_python: str | None = None, here_version: str | None = None) -> list[dict]:
-    """Every remembered install whose program still exists, this one included, newest first."""
-    items = _load(home / REGISTRY)
-    items.append({"version": here_version or __version__, "python": here_python or sys.executable})
+def _registered(home: Path, here_python: str | None = None, here_version: str | None = None) -> list[dict]:
+    """Every remembered install whose program still exists, oldest registration first.
+
+    The install running now is the most recent of all: it goes last, wherever it was before.
+    """
+    here = {"version": here_version or __version__, "python": here_python or sys.executable}
+    items = [i for i in _load(home / REGISTRY) if os.path.normcase(i["python"]) != os.path.normcase(here["python"])]
     seen, out = set(), []
-    for item in sorted(items, key=lambda i: version_key(i["version"]), reverse=True):
+    for item in [*items, here]:
         key = os.path.normcase(item["python"])
-        if key not in seen and Path(item["python"]).is_file():
-            seen.add(key)
+        if key in seen:
+            out = [o for o in out if os.path.normcase(o["python"]) != key]  # a later registration replaces it
+        seen.add(key)
+        if Path(item["python"]).is_file():
             out.append({"version": item["version"], "python": item["python"]})
     return out
+
+
+def known_installs(home: Path, here_python: str | None = None, here_version: str | None = None) -> list[dict]:
+    """Every remembered install whose program still exists, best first.
+
+    A higher version always wins. Among equal versions the most recently registered install wins, and the install
+    running now counts as the most recent of all.
+    """
+    registered = _registered(home, here_python, here_version)
+    return sorted(reversed(registered), key=lambda i: version_key(i["version"]), reverse=True)
 
 
 def _sh(pythons: list[str]) -> str:
@@ -101,8 +116,9 @@ def _cmd(pythons: list[str]) -> str:
 def write_launcher(say, home: Path | None = None) -> list[Path]:
     """(Re)write the launcher; returns the files written. Safe to run from any version at any time."""
     home = home or home_dir()
+    registered = _registered(home)  # kept in registration order, so the next run still knows who came last
+    _write_atomic(home / REGISTRY, json.dumps(registered, indent=2) + "\n")
     installs = known_installs(home)
-    _write_atomic(home / REGISTRY, json.dumps(installs, indent=2) + "\n")
     pythons = [i["python"] for i in installs]
     bin_dir = home / "bin"
     written = [bin_dir / "praxis"]

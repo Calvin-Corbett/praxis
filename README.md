@@ -63,8 +63,8 @@ The package is called `agent-praxis`; the command is `praxis`.
 when you update. Run `praxis launcher` once: it writes `~/.praxis/bin/praxis` (and `praxis.cmd` on Windows; set
 `PRAXIS_HOME` to use another folder than `~/.praxis`). That launcher always runs the newest Praxis you have installed,
 so you can put its full path in your agents' instructions and leave it. Run `praxis launcher` again after you
-install a new version (an older version running it never makes the launcher older). The launcher only chooses which
-Praxis runs; an older Praxis still refuses a project that a newer one has used (see "Several versions of Praxis").
+install a new version (an older version running it never makes the launcher older; among installs of the same
+version, the one you ran `praxis launcher` from wins). The launcher only chooses which Praxis runs; an older Praxis still refuses a project that a newer one has used (see "Several versions of Praxis").
 
 ---
 
