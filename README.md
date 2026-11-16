@@ -234,6 +234,13 @@ and its output goes to a log in `.git/praxis/logs/`; `praxis run --heavy` ends w
 If a runner crashes or its terminal is closed, Praxis notices it is gone and frees its place. `praxis status` lists
 the running and waiting heavy jobs with the agent and how long ago each started or joined.
 
+A heavy job may itself call `praxis run --heavy` (a test script that starts a browser run, say). Praxis gives every
+heavy job's environment a `PRAXIS_HEAVY_TOKEN`; when `praxis run --heavy` sees one that names a heavy job still
+running in this project, it says it is already inside a heavy job and runs the command straight away, with the same
+log, no window and the command's own exit code, and without taking a place. Otherwise two such jobs at the limit
+would each hold a place while waiting for another and never finish. A leftover token (the outer job is gone, or it
+belongs to another project) is ignored and the call waits in line as usual.
+
 ### Exit codes
 
 The check command tells Praxis what happened by its exit code:

@@ -225,3 +225,53 @@ def test_status_lists_running_and_waiting_jobs_with_agent_and_age(project):
             _unlock(handle)
             handle.close()
         store.close()
+
+
+def _praxis_inside(args: list[str], then: str = "") -> str:
+    """Source of a job that runs `python -m agent_praxis <args>` from inside a heavy job (a nested call)."""
+    return (
+        "import subprocess, sys\n"
+        f"r = subprocess.run([sys.executable, '-m', 'agent_praxis', *{args!r}], capture_output=True, text=True,"
+        " check=False, timeout=60)\n" + then
+    )
+
+
+def test_a_heavy_job_inside_a_heavy_job_runs_directly_at_the_limit(project, tmp_path):
+    _set_limit(project, 1)
+    seen = tmp_path / "seen.txt"
+    inner = ["run", "--heavy", sys.executable, "-c", "import sys; sys.exit(5)"]
+    outer = _praxis_inside(inner, f"open(r'{seen}', 'w').write(str(r.returncode) + '|' + r.stdout)\n")
+    proc = praxis_process(project, "run", "--heavy", *_py(outer))
+    out = proc.communicate(timeout=120)[0]  # a nested call that queued would wait forever: the inner timeout fails it
+    assert proc.returncode == 0, out
+    code, text = seen.read_text().split("|", 1)
+    assert code == "5", text  # the inner job's own exit code
+    assert "Already inside a heavy job" in text and "Waiting in line" not in text, text
+    store = Store(project / ".git" / "praxis")
+    try:
+        assert store.rows("SELECT * FROM heavy") == []
+    finally:
+        store.close()
+
+
+def test_status_inside_a_nested_call_shows_only_the_outer_job(project, tmp_path):
+    _set_limit(project, 1)
+    seen = tmp_path / "status.txt"
+    status = _praxis_inside(["status"], f"open(r'{seen}', 'w').write(r.stdout)\n")
+    outer = _praxis_inside(["run", "--heavy", sys.executable, "-c", status])
+    proc = praxis_process(project, "run", "--heavy", *_py(outer))
+    out = proc.communicate(timeout=120)[0]
+    assert proc.returncode == 0, out
+    text = seen.read_text()
+    assert text.count("running:") == 1 and "waiting:" not in text, text
+
+
+def test_a_stale_token_is_ignored_and_the_call_queues_normally(project, monkeypatch):
+    monkeypatch.setenv(heavy.TOKEN_ENV, "deadbeefdeadbeef")  # no such row in this project
+    code, out = praxis("run", "--heavy", *_py("print('queued normally')"))
+    assert code == 0 and "Already inside" not in out and "Running the heavy job now" in out, out
+    store = Store(project / ".git" / "praxis")
+    try:
+        assert store.rows("SELECT * FROM heavy") == []
+    finally:
+        store.close()

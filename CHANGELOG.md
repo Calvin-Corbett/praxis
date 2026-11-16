@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### New
+- **A heavy job can start another heavy job without freezing.** If the command you run with `praxis run --heavy`
+  itself calls `praxis run --heavy`, the inner call used to hold a place while waiting for another, so two such jobs
+  at the limit waited for each other forever. Now every heavy job's environment carries `PRAXIS_HEAVY_TOKEN`, and an
+  inner call that sees it says "Already inside a heavy job" and runs its command directly, with the same log and exit
+  code, taking no place of its own. `praxis status` still shows only the outer job. A leftover token from a job that
+  has ended, or from another project, is ignored and you queue normally.
 - **A queue for heavy jobs.** Run a whole test suite or a browser run with `praxis run --heavy <command...>` and it
   starts only when fewer than `heavy_jobs` (a new `praxis.toml` setting, default 2) heavy jobs are running on the
   project; otherwise it tells you who is in front of it and waits its turn. You get the job's own exit code, no

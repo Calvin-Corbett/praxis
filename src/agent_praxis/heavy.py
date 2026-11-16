@@ -21,6 +21,7 @@ from agent_praxis.landing_queue import _try_lock, _unlock, held
 from agent_praxis.store import Store
 
 POLL_SECONDS = 0.5
+TOKEN_ENV = "PRAXIS_HEAVY_TOKEN"  # set in a heavy job's environment: the job's own token, so a nested call knows
 
 
 def _lock_file(store: Store, token: str) -> Path:
@@ -61,6 +62,16 @@ def _try_start(store: Store, mine: int, limit: int) -> tuple[bool, list]:
         return False, running + before
 
 
+def _inside_heavy_job(store: Store) -> bool:
+    """True when this process runs inside a heavy job of this project: the token in the environment names a row that
+    exists here and whose runner is still alive and running. A stale or foreign token is not inside anything."""
+    token = os.environ.get(TOKEN_ENV)
+    if not token:
+        return False
+    rows = store.rows("SELECT * FROM heavy WHERE token = ?", (token,))
+    return bool(rows) and bool(rows[0]["started"]) and alive(store, token)
+
+
 def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
     """Wait for a free heavy place, run *command*, return its exit code."""
     if command and command[0] == "--":
@@ -71,6 +82,11 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
     store = ctx.store
     agent = os.environ.get("PRAXIS_AGENT") or agents.agent_here(ctx) or "(nobody)"
     text = command[0] if len(command) == 1 else subprocess.list2cmdline(command)
+    if _inside_heavy_job(store):
+        # Queueing here would hold a place while waiting for another: two such jobs at the limit would wait for each
+        # other forever. The outer job already holds a place, so run directly and take none.
+        ctx.say("Already inside a heavy job: running this command directly, without taking another place.")
+        return _execute(ctx, command, text, agent, None, os.environ[TOKEN_ENV])
     token = uuid.uuid4().hex
     (store.dir / "heavy").mkdir(parents=True, exist_ok=True)
     handle = open(_lock_file(store, token), "a+b")  # noqa: SIM115 - locked BEFORE the row exists, so it never looks dead while alive
@@ -96,7 +112,7 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
                     "Praxis waits as long as it takes; this is normal."
                 )
             time.sleep(poll)
-        return _execute(ctx, command, text, agent, mine)
+        return _execute(ctx, command, text, agent, mine, token)
     finally:
         if mine is not None:
             with store.write() as db:
@@ -109,8 +125,9 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
             pass
 
 
-def _execute(ctx, command: list[str], text: str, agent: str, mine: int) -> int:
+def _execute(ctx, command: list[str], text: str, agent: str, mine: int | None, token: str) -> int:
     env = hooks.command_env(ctx.cfg)
+    env[TOKEN_ENV] = token
     if agent != "(nobody)":
         env.setdefault("PRAXIS_AGENT", agent)
     log = hooks.new_log(ctx.store.dir / "logs", f"{agent.strip('()')}-heavy")
@@ -133,8 +150,9 @@ def _execute(ctx, command: list[str], text: str, agent: str, mine: int) -> int:
             out.write(f"Could not start it: {exc}\n".encode())
             ctx.say(f"The heavy job could not start: {exc}")
             return 127
-        with ctx.store.write() as db:
-            db.execute("UPDATE heavy SET pid = ? WHERE id = ?", (proc.pid, mine))
+        if mine is not None:
+            with ctx.store.write() as db:
+                db.execute("UPDATE heavy SET pid = ? WHERE id = ?", (proc.pid, mine))
         try:
             code = proc.wait()
         except BaseException:  # stopped (Ctrl+C): stop the job too
