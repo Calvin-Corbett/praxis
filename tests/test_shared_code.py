@@ -133,6 +133,27 @@ def test_a_real_clash_is_refused_naming_whose_landing_and_the_folder_is_left_cle
     assert "line 5 engine and ui" in git(project, "show", "main:scripts/player.gd")
 
 
+def test_putting_a_shared_file_back_to_an_older_version_is_refused(project):
+    """An agent that rewrites a shared file from an old copy would silently throw away another agent's landing."""
+    commit_in_main(project, "scripts/player.gd", PLAYER)
+    start = git(project, "rev-parse", "main")
+    praxis("start", "engine", "physics", "scripts/player.gd")
+    praxis("start", "ui", "menus", "scripts/player.gd")
+    engine, ui = folder(project, "engine"), folder(project, "ui")
+    edit(engine / "scripts" / "player.gd", PLAYER.replace("line 3\n", "line 3 engine\n"))
+    assert praxis("land", "engine")[0] == 0
+    edit(ui / "notes.txt", "ui's own work\n")
+    praxis("claim", "ui", "notes.txt")
+    git(ui, "add", "-A")
+    git(ui, "commit", "-qm", "ui's work")
+    git(ui, "rebase", "main")
+    git(ui, "checkout", start, "--", "scripts/player.gd")  # an old copy of the whole file
+    code, out = praxis("land", "ui")
+    assert code == 2, out
+    assert "scripts/player.gd (undoing engine's landing)" in out and "git checkout main -- <file>" in out, out
+    assert "line 3 engine" in git(project, "show", "main:scripts/player.gd"), "engine's work is still in main"
+
+
 # 2. Generated files -----------------------------------------------------------------------------------------------
 
 def _set_up_generator(project) -> None:
