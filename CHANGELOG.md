@@ -137,10 +137,11 @@
   and tells you. If the file has a mistake in it, the job tells you that and keeps the limit it had.
 - **A landing's check goes first in the heavy job line.** A landing's check, which a whole batch of agents can be
   waiting on, used to join at the back, behind short test jobs (place 14 in real use). Praxis now sets
-  `PRAXIS_CHECK=1` for the check command, for a batch's check and the full check too. A `praxis run --heavy` started
+  `PRAXIS_CHECK=1` for the check command, for a batch's check too. A `praxis run --heavy` started
   from inside it goes ahead of the waiting jobs that do not come from a check, behind other check jobs in the order
   they joined. It never stops a job that is already running. `praxis status` lists these jobs first and marks them
-  "landing check".
+  "landing check". The full check and an early check get `PRAXIS_CHECK=1` as well; they hold a heavy job place of
+  their own already, so a `praxis run --heavy` inside them runs straight away, as before.
 - **One agent cannot fill the heavy job line.** With the new `heavy_waiting_per_agent` setting (default `3`, `0` for
   no cap), when an agent already has that many jobs waiting, one more `praxis run --heavy` from it is refused with
   exit code 1 and a message listing its waiting jobs. Nothing is run. A landing check's jobs are never refused. The

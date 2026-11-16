@@ -263,12 +263,13 @@ If a runner crashes or its terminal is closed, Praxis notices it is gone and fre
 the running and waiting heavy jobs with the agent and how long ago each started or joined.
 
 **The order of the line.** A heavy job started from inside a landing's check goes first, because a whole batch of
-agents may be waiting on that landing. Praxis sets `PRAXIS_CHECK=1` for the check command (a batch's check and the
-full check too), and a `praxis run --heavy` that sees it joins ahead of the waiting jobs that do not come from a
+agents may be waiting on that landing. Praxis sets `PRAXIS_CHECK=1` for the check command (a batch's check too),
+and a `praxis run --heavy` that sees it joins ahead of the waiting jobs that do not come from a
 check, behind other check jobs in the order they joined. It never stops a job that is already running. The other
 jobs take turns by agent: an agent with nothing running goes before an agent that already has a job running, and
 equal turns go by arrival. `praxis status` lists the waiting jobs in the order they will start and marks a check's
-jobs "landing check".
+jobs "landing check". (The full check and an early check get `PRAXIS_CHECK=1` as well. They already hold a heavy
+job place of their own, so a `praxis run --heavy` inside them runs straight away.)
 
 **One agent cannot fill the line.** An agent may have `heavy_waiting_per_agent` jobs (default 3) waiting at once.
 One more `praxis run --heavy` from it is refused with exit code 1 and a message that lists the ones waiting; nothing
