@@ -73,7 +73,7 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
     text = command[0] if len(command) == 1 else subprocess.list2cmdline(command)
     token = uuid.uuid4().hex
     (store.dir / "heavy").mkdir(parents=True, exist_ok=True)
-    handle = open(_lock_file(store, token), "a+b")  # locked BEFORE the row exists: it never looks dead while alive
+    handle = open(_lock_file(store, token), "a+b")  # noqa: SIM115 - locked BEFORE the row exists, so it never looks dead while alive
     mine = None
     try:
         if not _try_lock(handle):

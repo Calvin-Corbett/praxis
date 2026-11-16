@@ -93,7 +93,7 @@ def test_a_third_job_waits_while_two_run_and_says_so(project, tmp_path):
                 time.sleep(0.2)
             rows = heavy.rows(store)
             assert [bool(r["started"]) for r in rows] == [True, True, False]
-            code, status = praxis("status")
+            _code, status = praxis("status")
             assert "HEAVY JOBS" in status and status.count("running:") == 2 and "waiting:" in status, status
             assert third.poll() is None  # still waiting in line
         finally:
@@ -115,7 +115,7 @@ def test_waiting_jobs_start_in_order(project, tmp_path):
     store = Store(project / ".git" / "praxis")
     token = uuid.uuid4().hex
     (store.dir / "heavy").mkdir(exist_ok=True)
-    holder = open(store.dir / "heavy" / f"{token}.lock", "a+b")  # a live runner holding the only place
+    holder = open(store.dir / "heavy" / f"{token}.lock", "a+b")  # noqa: SIM115 - held open on purpose: the lock lives as long as the handle  # a live runner holding the only place
     assert _try_lock(holder)
     with store.write() as db:
         db.execute(
@@ -177,7 +177,7 @@ def test_a_runner_that_dies_while_running_is_noticed(project, tmp_path):
     store = Store(project / ".git" / "praxis")
     token = uuid.uuid4().hex
     (store.dir / "heavy").mkdir(exist_ok=True)
-    holder = open(store.dir / "heavy" / f"{token}.lock", "a+b")
+    holder = open(store.dir / "heavy" / f"{token}.lock", "a+b")  # noqa: SIM115 - held open on purpose: the lock lives as long as the handle
     assert _try_lock(holder)
     with store.write() as db:
         db.execute(
@@ -208,7 +208,7 @@ def test_status_lists_running_and_waiting_jobs_with_agent_and_age(project):
         (store.dir / "heavy").mkdir(exist_ok=True)
         for agent, started in (("alice", time.time() - 7200), ("bob", None)):
             token = uuid.uuid4().hex
-            handle = open(store.dir / "heavy" / f"{token}.lock", "a+b")
+            handle = open(store.dir / "heavy" / f"{token}.lock", "a+b")  # noqa: SIM115 - held open on purpose: the lock lives as long as the handle
             assert _try_lock(handle)
             handles.append(handle)
             with store.write() as db:
