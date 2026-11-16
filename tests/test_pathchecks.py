@@ -114,7 +114,7 @@ def test_a_landing_runs_the_check_its_files_choose_and_names_it(project):
     assert "Running the check (check 1 of `checks` (scripts/enemy.gd))" in out
     assert "check passed (check 1 of `checks` (scripts/enemy.gd))" in out
     assert "alice landed" in praxis("status")[1] and "check 1 of `checks`" in praxis("status")[1]
-    log = sorted((project / ".git" / "praxis" / "logs").glob("alice-*.log"))[-1].read_text()
+    log = max((project / ".git" / "praxis" / "logs").glob("alice-*.log")).read_text()
     assert "STRICT-CHECK-RAN" in log
 
 
