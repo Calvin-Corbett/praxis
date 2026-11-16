@@ -2,6 +2,10 @@
 
 Only the Python standard library: on Windows the load comes from the system's own counters through ctypes, on
 Linux from /proc, elsewhere from the load average. Tests replace the reader with a fake through `use_reader`.
+
+The machine's reading includes the heavy jobs that are running, so each job's own share is measured too (treecpu)
+and taken out before the limit is sized: a queue that counts its own jobs as "the machine is busy" can never grow.
+Tests replace that measuring through `use_tree_reader`.
 """
 
 from __future__ import annotations
@@ -11,9 +15,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from agent_praxis import treecpu
+
 TARGET_CPU = 75.0  # the total CPU percent "auto" aims for
 LOW_MEMORY = 10.0  # below this much free memory (percent) "auto" allows one job at a time
 SAMPLE_SECONDS = 0.25  # how long the CPU is watched to measure how busy it is
+BIG_MACHINE_CORES = 8  # with this many cores or more, "auto" keeps at least 2 places (heavy_min's default)
 
 
 @dataclass
@@ -24,6 +31,7 @@ class Load:
 
 
 Reader = Callable[[], Load]
+TreeReader = Callable[[list[int]], "dict[int, float | None]"]  # job pids -> each one's percent of the whole CPU
 
 
 def cores() -> int:
@@ -33,6 +41,11 @@ def cores() -> int:
 def default_max() -> int:
     """The most places "auto" may use when praxis.toml sets no heavy_max: half the CPU cores, at least 2."""
     return max(2, cores() // 2)
+
+
+def default_min(machine_cores: int) -> int:
+    """The fewest places "auto" gives when praxis.toml sets no heavy_min: 2 on a big machine, else 1."""
+    return 2 if machine_cores >= BIG_MACHINE_CORES else 1
 
 
 # Windows ---------------------------------------------------------------------------------------------------------
@@ -133,28 +146,67 @@ def use_reader(reader: Reader | None) -> None:
     _reader = reader or _real_reader
 
 
+_watch = treecpu.watch
+
+
+def measure(pids: list[int]) -> tuple[Load, dict[int, float | None]]:
+    """(the machine's load right now, {pid: the percent of the whole CPU that process and everything it started is
+    using}) for the heavy jobs whose processes are *pids*, both over the same moment. A job that cannot be measured
+    has None."""
+    finish = _watch(pids, cores())
+    reading = read()
+    return reading, finish()
+
+
+def use_tree_reader(reader: TreeReader | None) -> None:
+    """Replace how the heavy jobs' own CPU share is measured (tests pass a fake); None puts the real one back."""
+    global _watch
+    _watch = treecpu.watch if reader is None else (lambda pids, _cores: lambda: reader(pids))
+
+
 # The limit ---------------------------------------------------------------------------------------------------------
 
 
-def auto_limit(running: int, load: Load, heavy_max: int = 0) -> tuple[int, str]:
-    """(how many heavy jobs may run at once, why) for *running* jobs now and the machine's *load*. Never below 1,
-    never above *heavy_max* (0 means half the CPU cores, at least 2). Aims for about TARGET_CPU percent of the CPU:
-    each running job is taken to cost its share of the CPU in use, and the headroom up to the target is split into
-    that many more places (or fewer, when the machine is past the target)."""
+def auto_limit(jobs: list[float | None], load: Load, heavy_max: int = 0, heavy_min: int = 0) -> tuple[int, str]:
+    """(how many heavy jobs may run at once, why) for the machine's *load*.
+
+    *jobs* has one entry for each heavy job running now: the percent of the whole CPU that job's process tree is
+    using, or None while that is not measured. The machine's reading includes those jobs, so their share is taken
+    out first: what is left is the load of other programs, which no heavy job limit can change. The room between
+    that and TARGET_CPU percent is split into places the size of one job: the average of the running jobs, where a
+    job counts as at least one core and as exactly one core until it is measured; with no job running, two cores.
+
+    Never above *heavy_max* (0 means half the CPU cores, at least 2) and never below *heavy_min* (0 means 2 on a
+    machine with BIG_MACHINE_CORES cores or more, else 1), so a job that fills every core it is given does not
+    hold the whole line at one place. Only nearly full memory brings it to 1 whatever heavy_min says."""
     ceiling = heavy_max if heavy_max > 0 else max(2, load.cores // 2)
+    floor = max(1, min(ceiling, heavy_min if heavy_min > 0 else default_min(load.cores)))
+    bounds = f"at most {ceiling}" if floor == 1 else f"at least {floor}, at most {ceiling}"
     if load.cpu is None:
-        limit = min(ceiling, 2)
-        return limit, f"auto: the machine's load could not be read, so {limit} (at most {ceiling})"
-    seen = f"CPU {load.cpu:.0f}%" + ("" if load.memory_free is None else f", memory {load.memory_free:.0f}% free")
+        limit = max(floor, min(ceiling, 2))
+        return limit, f"auto: the machine's load could not be read, so {limit} ({bounds})"
+    core = 100.0 / load.cores
+    own = min(load.cpu, sum(job for job in jobs if job is not None))
+    other = load.cpu - own
+    seen = _counted(other, own, jobs) + ("" if load.memory_free is None else f", memory {load.memory_free:.0f}% free")
     if load.memory_free is not None and load.memory_free < LOW_MEMORY:
-        return 1, f"auto: 1 because memory is nearly full ({seen}; at most {ceiling})"
-    share = max(load.cpu / running, 100.0 / load.cores) if running else 2 * 100.0 / load.cores
-    spare = (
-        int((TARGET_CPU - load.cpu) // share) if load.cpu <= TARGET_CPU else -int((load.cpu - TARGET_CPU) // share + 1)
-    )
-    limit = max(1, min(ceiling, running + spare))
-    note = "room to spare" if spare > 0 else "busy" if spare < 0 else "at the target"
-    return (
-        limit,
-        f"auto: {limit} ({seen}, {running} running now, {note}; at most {ceiling}, aiming for {TARGET_CPU:.0f}% CPU)",
-    )
+        return 1, f"auto: 1 because memory is nearly full ({seen}; {bounds})"
+    costs = [core if job is None else max(core, job) for job in jobs]
+    typical = sum(costs) / len(costs) if costs else 2 * core
+    fits = int((TARGET_CPU - other) // typical)
+    limit = max(floor, min(ceiling, fits))
+    note = "room to spare" if fits > len(jobs) else "busy" if fits < max(1, len(jobs)) else "at the target"
+    if fits < floor and floor > 1:
+        note += f", but never fewer than {floor} here (heavy_min)"
+    return limit, f"auto: {limit} ({seen}; {note}; {bounds}, aiming for {TARGET_CPU:.0f}% CPU)"
+
+
+def _counted(other: float, own: float, jobs: list[float | None]) -> str:
+    """What the limit was sized from, in words: the other programs' load, and the heavy jobs' own."""
+    if not jobs:
+        return f"other programs {other:.0f}%, no heavy job running"
+    text = f"other programs {other:.0f}%, {len(jobs)} heavy job{'s' if len(jobs) != 1 else ''} using {own:.0f}%"
+    unknown = sum(1 for job in jobs if job is None)
+    if unknown:
+        text += f" ({unknown} not measured yet, counted as one core{' each' if unknown != 1 else ''})"
+    return text

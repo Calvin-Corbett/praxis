@@ -121,6 +121,34 @@
   folder (child processes included), `PRAXIS_HOME` and git's global settings are the test's own, and settings left
   in the environment by whoever started the tests (`PRAXIS_AGENT`, `GIT_DIR`) are cleared. The tests no longer sign
   their commits with your key or read your `~/.praxis`.
+- **`heavy_jobs = "auto"` no longer counts its own jobs.** In the previous version, auto counted its own jobs. It
+  sized the limit from the machine's CPU reading, and that reading included the heavy jobs Praxis had already
+  started. One job that kept the CPU busy read as "the machine is busy", so the limit stayed at 1 however many jobs
+  waited. In real use that was 1 running and 27 waiting on a machine with 16 threads, where two at once had been
+  fine. Praxis now measures the CPU each running heavy job uses (its process and everything that process started)
+  and takes it out of the reading. The limit is sized from what other programs use and what one job costs.
+  `praxis status` says what was counted, for example "other programs 22%, 2 heavy jobs using 48%". The new
+  `heavy_min` setting is the fewest places auto gives: 2 by default on a machine with 8 or more cores, 1 on a
+  smaller one, so a job that fills every core it gets no longer holds the whole line at one place. Set
+  `heavy_min = 1` if you want the limit to fall to 1 as before. Nearly full memory still means 1.
+- **A heavy job that is already waiting follows `praxis.toml`.** Each `praxis run --heavy` read `heavy_jobs` once,
+  when it started, so raising the limit did nothing for the jobs already in line. A waiting job now reads
+  `heavy_jobs`, `heavy_max` and `heavy_min` again from the main folder's `praxis.toml` whenever that file changes,
+  and tells you. If the file has a mistake in it, the job tells you that and keeps the limit it had.
+- **A landing's check goes first in the heavy job line.** A landing's check, which a whole batch of agents can be
+  waiting on, used to join at the back, behind short test jobs (place 14 in real use). Praxis now sets
+  `PRAXIS_CHECK=1` for the check command, for a batch's check and the full check too. A `praxis run --heavy` started
+  from inside it goes ahead of the waiting jobs that do not come from a check, behind other check jobs in the order
+  they joined. It never stops a job that is already running. `praxis status` lists these jobs first and marks them
+  "landing check".
+- **One agent cannot fill the heavy job line.** With the new `heavy_waiting_per_agent` setting (default `3`, `0` for
+  no cap), when an agent already has that many jobs waiting, one more `praxis run --heavy` from it is refused with
+  exit code 1 and a message listing its waiting jobs. Nothing is run. A landing check's jobs are never refused. The
+  order is fairer too: it was first come first served, and now an agent with nothing running goes before an agent
+  that already has a job running, in turns by agent, with equal turns going by arrival.
+- The project database is now format 6 (one new column, `priority`, on the heavy jobs table, for the landing check's
+  jobs). Praxis upgrades it the first time the new version opens your project; an older Praxis then refuses that
+  project (update it, or use the launcher).
 
 ## 0.4.0
 

@@ -52,6 +52,8 @@ class Config:
     exclusive_code: bool = False
     heavy_jobs: int | str = 2  # a number, or "auto": sized from the machine's load each time a job asks
     heavy_max: int = 0  # the most places "auto" may use; 0 means half the CPU cores, at least 2
+    heavy_min: int = 0  # the fewest places "auto" gives; 0 means 2 on a machine with 8 or more cores, else 1
+    heavy_waiting_per_agent: int = 3  # the most heavy jobs one agent may have WAITING in line; 0 means no cap
     batch_max: int = 4
     generated: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
@@ -152,9 +154,15 @@ exclusive_code = {"true" if cfg.exclusive_code else "false"}
 # How many heavy jobs (`praxis run --heavy <command>`: whole test suites, browser runs) may run at once on this
 # project, across all agents. The others wait in line. A number, or "auto": Praxis then sizes the limit from the
 # machine's load each time a job asks (more places while the CPU and memory are idle, fewer under load, aiming
-# for about 75 percent CPU), never below 1 and never above heavy_max (default: half the CPU cores, at least 2).
+# for about 75 percent CPU). The heavy jobs' own CPU use is measured and left out of "the machine is busy". Never
+# above heavy_max (default: half the CPU cores, at least 2) and never below heavy_min (default: 2 on a machine
+# with 8 or more cores, else 1). A job already waiting picks up a change to these three without being restarted.
 heavy_jobs = {_q(cfg.heavy_jobs) if isinstance(cfg.heavy_jobs, str) else cfg.heavy_jobs}
-{_heavy_max(cfg)}
+{_heavy_bounds(cfg)}
+# The most heavy jobs one agent may have WAITING in line at once: one more is refused, with the list of the ones
+# waiting. 0 means no cap. The heavy jobs of a landing's check are never refused, and they go first.
+heavy_waiting_per_agent = {cfg.heavy_waiting_per_agent}
+
 # Different checks for different changes. Praxis looks at the files a landing changes and runs the `run`
 # command of the FIRST entry here whose `paths` match any changed file; otherwise it runs `check` above. So
 # put the strictest entries first. Paths are read from the top of the project (* stays inside one folder,
@@ -235,8 +243,8 @@ shell_fix = {"true" if cfg.shell_fix else "false"}
 """
 
 
-def _heavy_max(cfg: Config) -> str:
-    return f"heavy_max = {cfg.heavy_max}\n" if cfg.heavy_max else ""
+def _heavy_bounds(cfg: Config) -> str:
+    return "".join(f"{name} = {getattr(cfg, name)}\n" for name in ("heavy_max", "heavy_min") if getattr(cfg, name))
 
 
 def _checks(items: list[dict]) -> str:
@@ -378,6 +386,13 @@ def load(root: Path) -> Config:
         raise PraxisError('praxis.toml: heavy_jobs must be 1 or more (or "auto").')
     if cfg.heavy_max < 0:
         raise PraxisError("praxis.toml: heavy_max must be 1 or more (or leave it out).")
+    if cfg.heavy_min < 0:
+        raise PraxisError("praxis.toml: heavy_min must be 1 or more (or leave it out).")
+    if cfg.heavy_max and cfg.heavy_min > cfg.heavy_max:
+        raise PraxisError(f"praxis.toml: heavy_min ({cfg.heavy_min}) cannot be more than heavy_max "
+                          f"({cfg.heavy_max}). Lower heavy_min, or raise heavy_max.")
+    if cfg.heavy_waiting_per_agent < 0:
+        raise PraxisError("praxis.toml: heavy_waiting_per_agent must be 0 (no cap) or more.")
     if cfg.batch_max < 1:
         raise PraxisError("praxis.toml: batch_max must be 1 or more (1 turns batching off).")
     if cfg.full_check_every < 0:
@@ -511,6 +526,7 @@ _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": 
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str, "shell_fix": bool,
           "setup": str, "share": list, "after_land": str, "after_done": str, "commit_trailers": list,
           "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
+          "heavy_min": int, "heavy_waiting_per_agent": int,
           "generated": "tables", "checks": "tables", "full_check": str, "full_check_every": int,
           "speculate": bool}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',

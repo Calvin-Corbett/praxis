@@ -645,7 +645,8 @@ def _new_log(logs: Path, agent: str) -> Path:
 
 def _run_check(ctx: Ctx, row, folder: Path, command: str) -> tuple[int, str, str]:
     """(the check's exit code, the end of its output, its log)."""
-    env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
+    # PRAXIS_CHECK: a `praxis run --heavy` inside the check knows a landing waits on it, and goes first (heavy.py).
+    env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"], PRAXIS_CHECK="1")
     logs = ctx.store.dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = _new_log(logs, row["name"])

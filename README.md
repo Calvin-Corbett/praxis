@@ -256,11 +256,29 @@ When no landing is running, it reports how the agent's last landing ended.
 Whole test suites and browser runs can swamp the machine when several agents start them at once. Run them with
 `praxis run --heavy <command...>` (for example `praxis run --heavy pytest`). Praxis starts the command only when
 fewer than `heavy_jobs` heavy jobs (`praxis.toml`, default 2) are already running for this project, whichever agent
-started them. Otherwise it says who is in front of it and waits its turn, first come first served, with no time
+started them. Otherwise it says who is in front of it and waits its turn, with no time
 limit. The job runs in your current folder with your environment (`PRAXIS_AGENT` and the rest), opens no window,
 and its output goes to a log in `.git/praxis/logs/`; `praxis run --heavy` ends with the job's own exit code.
 If a runner crashes or its terminal is closed, Praxis notices it is gone and frees its place. `praxis status` lists
 the running and waiting heavy jobs with the agent and how long ago each started or joined.
+
+**The order of the line.** A heavy job started from inside a landing's check goes first, because a whole batch of
+agents may be waiting on that landing. Praxis sets `PRAXIS_CHECK=1` for the check command (a batch's check and the
+full check too), and a `praxis run --heavy` that sees it joins ahead of the waiting jobs that do not come from a
+check, behind other check jobs in the order they joined. It never stops a job that is already running. The other
+jobs take turns by agent: an agent with nothing running goes before an agent that already has a job running, and
+equal turns go by arrival. `praxis status` lists the waiting jobs in the order they will start and marks a check's
+jobs "landing check".
+
+**One agent cannot fill the line.** An agent may have `heavy_waiting_per_agent` jobs (default 3) waiting at once.
+One more `praxis run --heavy` from it is refused with exit code 1 and a message that lists the ones waiting; nothing
+is run. Wait until one of them has started, or put the work into fewer, larger jobs. A landing check's jobs are never
+refused and do not count, and neither do jobs with no agent's name on them (started in the main folder, or the full
+check).
+
+**A waiting job follows `praxis.toml`.** Change `heavy_jobs`, `heavy_max` or `heavy_min` in the main folder's
+`praxis.toml` and the jobs already waiting go by the new values at their next look, and say so. You do not have to
+stop and restart them.
 
 A heavy job may itself call `praxis run --heavy` (a test script that starts a browser run, say). Praxis gives every
 heavy job's environment a `PRAXIS_HEAVY_TOKEN`; when `praxis run --heavy` sees one that names a heavy job still
@@ -382,6 +400,23 @@ the CPU cores, at least 2). Jobs already running are never stopped when the limi
 next one may start. `praxis status` shows the current limit and the load it came from. Load is read with the
 Python standard library only (Windows counters through ctypes, `/proc` and the load average elsewhere); if it cannot
 be read, `"auto"` allows 2.
+
+The heavy jobs' own work is not counted as "the machine is busy". Praxis measures the CPU each running heavy job
+uses (its process and every process that one started) and takes it out of the machine's reading. What is left is
+the load of other programs. The room between that and 75 percent is split into places the size of one job: the
+average of the running jobs, where a job counts as at least one core, and as exactly one core until it has been
+measured (two cores when no job is running). `praxis status` says what was counted, for example
+`auto: 2 (other programs 22%, 2 heavy jobs using 48%, memory 34% free; ...)`. A process whose parent has already
+ended is not found under its job, so a job that starts programs and lets go of them looks lighter than it is.
+
+**`heavy_min`** (default: `2` on a machine with 8 or more CPU cores, `1` on a smaller one): the fewest places
+`"auto"` gives. A job that uses every core it can get (a parallel build or test run) always fills the CPU, so sized
+by CPU alone the limit would stay at 1; `heavy_min` keeps a big machine at 2 or more. Set `heavy_min = 1` to let the
+limit fall to 1 again. Nearly full memory (under 10 percent free) allows 1 whatever `heavy_min` says. It cannot be
+more than `heavy_max`.
+
+**`heavy_waiting_per_agent`** (default `3`): the most heavy jobs one agent may have waiting in line at once (see
+"Heavy jobs" above). `0` means no cap. Running jobs do not count, only waiting ones.
 
 **`checks`**: a different check for different changes, for example
 `checks = [{ paths = ["js/thermo.js", "css/**"], run = "npm run test:ui" }, { paths = ["js/**"], run = "npm run test:js" }]`.

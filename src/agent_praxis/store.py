@@ -22,7 +22,7 @@ from agent_praxis.errors import PraxisError
 
 # The database's format number (kept in SQLite's user_version). Raise it whenever the tables change, and add the
 # step that brings an older database up to it to UPGRADES. A database from before format numbers reads as 0.
-FORMAT = 5
+FORMAT = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -129,11 +129,24 @@ CREATE TABLE IF NOT EXISTS fullchecks (
     steps TEXT
 );
 """,
+    # A heavy job started from inside a landing's check goes ahead of the waiting jobs that were not (heavy.py).
+    6: """
+ALTER TABLE heavy ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+""",
 }
 
 
 def _statements(script: str) -> list[str]:
     return [part.strip() for part in script.split(";") if part.strip()]
+
+
+def _apply(db, statement: str) -> None:
+    """Run one upgrade statement. Adding a column the table already has is not a mistake: the step ran before."""
+    try:
+        db.execute(statement)
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
 
 
 def added_in(table: str) -> int:
@@ -203,7 +216,7 @@ class Store:
             steps = [SCHEMA] + [UPGRADES[n] for n in range(max(found, 1) + 1, FORMAT + 1)]
             for script in steps:
                 for statement in _statements(script):
-                    db.execute(statement)
+                    _apply(db, statement)
             db.execute(f"PRAGMA user_version = {FORMAT}")
             self.format = FORMAT
 

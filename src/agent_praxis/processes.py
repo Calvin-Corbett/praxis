@@ -131,7 +131,9 @@ def _ps() -> tuple[list[Proc], dict[int, int]]:
 _QUERY_LIMITED, _COMMAND_LINE_INFO, _SNAPSHOT_PROCESSES = 0x1000, 60, 0x2
 
 
-def _windows() -> tuple[list[Proc], dict[int, int]]:
+def windows_parents() -> dict[int, int]:
+    """{pid: its parent's pid} for every process on the machine, from one look at the Windows process list. {} when
+    it cannot be read."""
     import ctypes
     from ctypes import wintypes
 
@@ -142,25 +144,15 @@ def _windows() -> tuple[list[Proc], dict[int, int]]:
                     ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
                     ("szExeFile", ctypes.c_wchar * 260)]
 
-    class UnicodeString(ctypes.Structure):
-        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", ctypes.c_void_p)]
-
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    ntdll = ctypes.WinDLL("ntdll")
     k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
     k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
     k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
-    k32.OpenProcess.restype = wintypes.HANDLE
-    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     k32.CloseHandle.argtypes = [wintypes.HANDLE]
-    ntdll.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
-                                                ctypes.POINTER(wintypes.ULONG)]
-    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
-
     snap = k32.CreateToolhelp32Snapshot(_SNAPSHOT_PROCESSES, 0)
     if not snap or snap == wintypes.HANDLE(-1).value:
-        return [], {}
+        return {}
     pids: dict[int, int] = {}
     try:
         entry = Entry()
@@ -171,6 +163,26 @@ def _windows() -> tuple[list[Proc], dict[int, int]]:
             more = k32.Process32NextW(snap, ctypes.byref(entry))
     finally:
         k32.CloseHandle(snap)
+    return pids
+
+
+def _windows() -> tuple[list[Proc], dict[int, int]]:
+    import ctypes
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", ctypes.c_void_p)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
+                                                ctypes.POINTER(wintypes.ULONG)]
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+
+    pids = windows_parents()
     found = []
     buf = ctypes.create_string_buffer(8192)
     for pid in pids:

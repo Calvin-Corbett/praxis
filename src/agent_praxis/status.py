@@ -266,11 +266,16 @@ def _heavy_lines(ctx, now: float) -> list[str]:
         out = [f"HEAVY JOBS (at most {ctx.cfg.heavy_jobs} run at once; `praxis run --heavy <command>`)"]
     else:
         return []
-    for j in jobs:
-        if j["started"]:
-            out.append(f"  - running: {j['agent']}, started {ago(j['started'], now)}: {j['command']}")
-        else:
-            out.append(f"  - waiting: {j['agent']}, joined {ago(j['enqueued'], now)}: {j['command']}")
+    running, waiting = heavy.in_order(jobs)  # a landing check's jobs first, then the others in the order they start
+    for j in sorted(running, key=lambda j: not heavy.is_check(j)):
+        who = f"{j['agent']} (landing check)" if heavy.is_check(j) else j["agent"]
+        out.append(f"  - running: {who}, started {ago(j['started'], now)}: {j['command']}")
+    for j in waiting:
+        who = f"{j['agent']} (landing check, goes first)" if heavy.is_check(j) else j["agent"]
+        out.append(f"  - waiting: {who}, joined {ago(j['enqueued'], now)}: {j['command']}")
+    if len(waiting) > 1:
+        out.append("  (waiting jobs start from the top: a landing check's first, then an agent with nothing running "
+                   "before one that has a job running)")
     return [*out, ""]
 
 

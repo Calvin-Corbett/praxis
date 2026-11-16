@@ -1,10 +1,15 @@
 """`praxis run --heavy <command...>`: a queue for jobs that eat the machine (whole test suites, browser runs).
 
 At most `heavy_jobs` (praxis.toml, default 2) heavy jobs run at once for the project, whichever agent started them;
-the rest wait in line, first come first served, and say so. Each runner keeps a small file locked with the
-operating system's file lock while it lives, exactly like the landing line's tickets: when a runner dies (closed
-terminal, crash, power cut) the lock is freed, and the next runner to look sees its row is dead and removes it, so
-a crashed job never holds a place. Nobody's wait times out.
+the rest wait in line and say so. Each runner keeps a small file locked with the operating system's file lock while
+it lives, exactly like the landing line's tickets: when a runner dies (closed terminal, crash, power cut) the lock
+is freed, and the next runner to look sees its row is dead and removes it, so a crashed job never holds a place.
+Nobody's wait times out.
+
+The order of the line (see `in_order`): a job started from inside a landing's check goes first, because a whole
+batch of agents waits on that landing; then the other jobs, an agent with nothing running before an agent that
+already has a job running. A running job is never stopped to make room. One agent may have only
+`heavy_waiting_per_agent` jobs waiting, so it cannot fill the line.
 """
 
 from __future__ import annotations
@@ -14,15 +19,18 @@ import os
 import subprocess
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 
-from agent_praxis import agents, hooks, load, shells
+from agent_praxis import agents, config, hooks, load, shells
 from agent_praxis.errors import PraxisError
 from agent_praxis.landing_queue import _try_lock, _unlock, held
 from agent_praxis.store import Store
 
 POLL_SECONDS = 0.5
 TOKEN_ENV = "PRAXIS_HEAVY_TOKEN"  # set in a heavy job's environment: the job's own token, so a nested call knows
+CHECK_ENV = "PRAXIS_CHECK"  # "1" in the environment of a landing's check command (landing._run_check)
+LIVE_SETTINGS = ("heavy_jobs", "heavy_max", "heavy_min")  # read again from praxis.toml while a job waits
 
 
 def _lock_file(store: Store, token: str) -> Path:
@@ -40,14 +48,48 @@ def rows(store: Store) -> list:
     return [r for r in store.rows("SELECT * FROM heavy ORDER BY id") if alive(store, r["token"])]
 
 
+def is_check(job) -> bool:
+    """True for a landing check's job. A project's database can stay at an older format while commands of an older
+    Praxis are still running in it: its heavy table has no such column, and every job there is an ordinary one."""
+    return "priority" in job.keys() and bool(job["priority"])  # noqa: SIM118 - a database row is not a dict
+
+
+def in_order(jobs: list) -> tuple[list, list]:
+    """(the running jobs, the waiting jobs in the order they will start) for *jobs*, oldest first.
+
+    A landing check's jobs come first, in the order they joined. Then the others take turns by agent: each agent's
+    jobs are numbered from the ones it has running (not counting a landing check's), so an agent with nothing
+    running comes before an agent with one job running, which comes before an agent with two. Equal turns go by
+    arrival."""
+    running = [r for r in jobs if r["started"]]
+    waiting = [r for r in jobs if not r["started"]]
+    turn = Counter(r["agent"] for r in running if not is_check(r))
+    later = []
+    for r in waiting:
+        if not is_check(r):
+            later.append((turn[r["agent"]], r["id"], r))
+            turn[r["agent"]] += 1
+    later.sort(key=lambda item: item[:2])
+    return running, [r for r in waiting if is_check(r)] + [r for _turn, _id, r in later]
+
+
+def _in_front(jobs: list, mine: int) -> list:
+    """The jobs job *mine* waits for: every running one, and the waiting ones that start before it."""
+    running, waiting = in_order(jobs)
+    ids = [r["id"] for r in waiting]
+    return running + (waiting[: ids.index(mine)] if mine in ids else waiting)
+
+
 def limit_now(ctx) -> tuple[int, str]:
     """(how many heavy jobs may run at once right now, and why). A number in praxis.toml is that number; "auto" is
-    sized from the machine's load at this moment (see load.auto_limit)."""
+    sized from the machine's load at this moment, with the running heavy jobs' own share of it measured and left
+    out (see load.auto_limit)."""
     setting = ctx.cfg.heavy_jobs
     if setting != "auto":
         return max(1, int(setting)), f"heavy_jobs = {setting} in praxis.toml"
-    running = sum(1 for r in rows(ctx.store) if r["started"])
-    return load.auto_limit(running, load.read(), ctx.cfg.heavy_max)
+    pids = [r["pid"] for r in rows(ctx.store) if r["started"]]
+    reading, shares = load.measure([pid for pid in pids if pid])
+    return load.auto_limit([shares.get(pid) for pid in pids], reading, ctx.cfg.heavy_max, ctx.cfg.heavy_min)
 
 
 def _forget_dead(store: Store, db, mine: int) -> None:
@@ -61,16 +103,67 @@ def _forget_dead(store: Store, db, mine: int) -> None:
 
 
 def _try_start(store: Store, mine: int, limit: int) -> tuple[bool, list]:
-    """Start now if fewer than *limit* jobs run and nobody waited longer. Else (False, the jobs in front of us)."""
+    """Start now if fewer than *limit* jobs run and no waiting job is in front. Else (False, the jobs in front)."""
     with store.write() as db:
         _forget_dead(store, db, mine)
-        live = db.execute("SELECT * FROM heavy ORDER BY id").fetchall()
-        running = [r for r in live if r["started"]]
-        before = [r for r in live if not r["started"] and r["id"] < mine]
-        if len(running) < limit and not before:
+        ahead = _in_front(db.execute("SELECT * FROM heavy ORDER BY id").fetchall(), mine)
+        if len(ahead) < limit and all(r["started"] for r in ahead):
             db.execute("UPDATE heavy SET started = ? WHERE id = ?", (time.time(), mine))
             return True, []
-        return False, running + before
+        return False, ahead
+
+
+def _join(ctx, db, agent: str, token: str, text: str, priority: bool) -> int:
+    """Add the job to the line (inside the caller's database write) and give its row id. Refused when *agent*
+    already has heavy_waiting_per_agent jobs waiting: a landing check's job never is, and neither is a job with no
+    agent's name on it (started in the main folder, or the full check)."""
+    cap = ctx.cfg.heavy_waiting_per_agent
+    if cap > 0 and not priority and not agent.startswith("("):
+        mine = db.execute("SELECT * FROM heavy WHERE agent = ? AND started IS NULL ORDER BY id", (agent,)).fetchall()
+        waiting = [r for r in mine if not is_check(r) and alive(ctx.store, r["token"])]
+        if len(waiting) >= cap:
+            from agent_praxis.status import ago
+
+            listed = "\n".join(f"  - {r['command']} (joined {ago(r['enqueued'])})" for r in waiting)
+            raise PraxisError(
+                f"{agent} already has {len(waiting)} heavy job{'s' if len(waiting) != 1 else ''} waiting in line, "
+                f"and one agent may have at most {cap} waiting (heavy_waiting_per_agent in praxis.toml), so this "
+                f"one was not added and nothing was run. Waiting now:\n{listed}\n"
+                "Wait until one of them has started, or put what you need into fewer, larger jobs. `praxis status` "
+                "shows the whole line."
+            )
+    row = db.execute(
+        "INSERT INTO heavy (agent, token, command, enqueued, pid) VALUES (?, ?, ?, ?, ?)",
+        (agent, token, text, time.time(), os.getpid()),  # this runner's pid until the job has its own
+    ).lastrowid
+    if priority and any(column["name"] == "priority" for column in db.execute("PRAGMA table_info(heavy)")):
+        db.execute("UPDATE heavy SET priority = 1 WHERE id = ?", (row,))
+    return row
+
+
+def _reread(ctx, seen):
+    """Bring the limits a waiting job goes by up to date with praxis.toml in the main folder, so a change reaches
+    the jobs already in line. The file is read only when it changed: *seen* is what this returned last time."""
+    path = ctx.repo.root / config.FILE_NAME
+    try:
+        info = path.stat()
+    except OSError:
+        return seen
+    stamp = (info.st_mtime_ns, info.st_size)
+    if stamp == seen:
+        return seen
+    try:
+        fresh = config.load(ctx.repo.root)
+    except PraxisError as exc:
+        ctx.say(f"praxis.toml changed but cannot be read, so the heavy job limit stays as it was. {exc}")
+        return stamp
+    changed = [name for name in LIVE_SETTINGS if getattr(fresh, name) != getattr(ctx.cfg, name)]
+    for name in changed:
+        setattr(ctx.cfg, name, getattr(fresh, name))
+    if changed:
+        now = ", ".join(f"{name} = {getattr(fresh, name)!r}".replace("'", '"') for name in changed)
+        ctx.say(f"praxis.toml changed while this job waited. It now goes by: {now}")
+    return stamp
 
 
 def _inside_heavy_job(store: Store) -> bool:
@@ -89,8 +182,10 @@ def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS, wait: bool = T
     (the place's row id, its token). Inside a heavy job of this project it takes no place and gives (None, the outer
     job's token): queueing there would hold one place while waiting for another, and two such jobs at the limit
     would wait for each other forever. With wait=False it never waits: when no place is free right now it gives
-    (None, None), and the caller does without."""
+    (None, None), and the caller does without. Started from inside a landing's check (CHECK_ENV), it is a landing
+    check's job: it goes ahead of the waiting jobs that are not."""
     store = ctx.store
+    priority = os.environ.get(CHECK_ENV) == "1"
     if _inside_heavy_job(store):
         ctx.say("Already inside a heavy job: running this command directly, without taking another place.")
         yield None, os.environ[TOKEN_ENV]
@@ -104,28 +199,31 @@ def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS, wait: bool = T
         if not _try_lock(handle):
             raise RuntimeError("could not lock a brand-new heavy job file")
         with store.write() as db:
-            mine = db.execute(
-                "INSERT INTO heavy (agent, token, command, enqueued) VALUES (?, ?, ?, ?)",
-                (agent, token, text, time.time()),
-            ).lastrowid
-        told = None
+            mine = _join(ctx, db, agent, token, text, priority)
+        first = "This job belongs to a landing's check, so it goes ahead of the waiting jobs that do not. "
+        first = first if priority else ""
+        told = seen = None
         while True:
-            limit, why = limit_now(ctx)  # read outside the database lock: measuring the load takes a moment
-            go, ahead = _try_start(store, mine, limit)
-            if go:
-                break
+            ahead, limit = _in_front(rows(store), mine), None
+            if all(r["started"] for r in ahead):  # first in line: only now does the limit decide anything
+                limit, why = limit_now(ctx)  # read outside the database lock: measuring the load takes a moment
+                go, ahead = _try_start(store, mine, limit)
+                if go:
+                    break
             if not wait:
                 yield None, None
                 return
             if told != len(ahead):
                 told = len(ahead)
+                if limit is None:
+                    limit, why = limit_now(ctx)
                 ctx.say(
                     f"Waiting in line for a heavy job place: {len(ahead)} in front "
                     f"({', '.join(r['agent'] for r in ahead)}), at most {limit} run at once on this project "
-                    f"({why}). "
-                    "Praxis waits as long as it takes; this is normal."
+                    f"({why}). {first}Praxis waits as long as it takes; this is normal."
                 )
             time.sleep(poll)
+            seen = _reread(ctx, seen)
         yield mine, token
     finally:
         if mine is not None:
