@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 import traceback
 
-from agent_praxis import __version__, agents, config, gitops
+from agent_praxis import __version__, agents, config, gitops, live
 from agent_praxis.agents import Ctx
 from agent_praxis.errors import PraxisError
 from agent_praxis.store import Store
@@ -35,16 +36,42 @@ When things go wrong:
   praxis release-stale [agent...] [--force]     free the files of agents that went quiet
   praxis unclaim <agent> <files...>             let go of files
   praxis setup <agent>                          run praxis.toml's setup command in the agent's folder again
-  praxis launcher                               (re)write the stable per-user launcher that runs the newest Praxis
+  praxis launcher [--switch]                    register this Praxis with the stable per-user launcher; --switch
+                                                makes the launcher run the newest installed Praxis
+
+A newer Praxis does not take a project over while commands of an older Praxis are still running in it: it works with
+the project as it is where it can, or says who is still running and changes nothing. Add --upgrade-now to any command
+to take over at once.
 
 Exit codes: 0 done, 1 refused (the message says why; nothing was changed), 2 not landed or a step failed (the
 message says why; work is kept), 3 Praxis hit a problem it did not expect, 130 stopped with Ctrl+C.
 """
 
 
+# The tables each command uses besides the first ones (agents, claims, landings, queue, removing). While commands of
+# an older Praxis are still running, the project's database is left at their format: a command listed here carries on
+# when the database has its tables, and every other command (it may use any table) waits for them to finish.
+USES = {
+    "status": (),  # shows the heavy jobs and the check cache only when the database has them
+    "claim": (),
+    "unclaim": (),
+    "blocked": (),
+    "resume": (),
+    "setup": (),
+    "start": ("branches",),
+    "done": ("branches",),
+    "abandon": ("branches",),
+    "release-stale": ("branches",),
+    "wait": ("background",),
+    "run": ("heavy",),
+}
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="praxis", description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
+    upgrade_help = "take this project over at once, even while commands of an older Praxis are still running in it"
+    p.add_argument("--upgrade-now", action="store_true", help=upgrade_help)
     sub = p.add_subparsers(dest="command", metavar="command")
 
     s = sub.add_parser("init", help="set this project up for Praxis")
@@ -87,7 +114,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--why", default="", help=argparse.SUPPRESS)
 
     sub.add_parser("status", help="show who is doing what")
-    sub.add_parser("launcher", help="write the launcher at ~/.praxis/bin that always runs the newest Praxis")
+    s = sub.add_parser("launcher", help="register this Praxis with the launcher at ~/.praxis/bin")
+    s.add_argument("--switch", action="store_true",
+                   help="make the launcher run the newest installed Praxis (without it, the launcher keeps running "
+                        "the version it runs now)")
 
     for name, text in (("done", "finish an agent whose work has landed"),
                        ("abandon", "stop an agent, saving unlanded work"),
@@ -103,14 +133,25 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("agents", nargs="*")
     s.add_argument("--force", action="store_true",
                    help="release even an agent with programs running in its folder, unsaved edits or a landing in line")
+    for name, s in sub.choices.items():
+        if name not in ("init", "launcher"):  # the two that never open the project's database
+            # SUPPRESS: given before the command (`praxis --upgrade-now status`) it is not reset by the command's own.
+            s.add_argument("--upgrade-now", action="store_true", default=argparse.SUPPRESS, help=upgrade_help)
     return p
 
 
-def _ctx() -> tuple[Ctx, Store]:
+def _ctx(args=None, argv: tuple | list = ()) -> tuple[Ctx, Store]:
+    """Open the project for the command in *args* (with none given: for any command, as the tests do)."""
     repo = gitops.find_repo()
     cfg = config.load(repo.root)
-    store = Store(repo.state_dir)
+    doing = " ".join(("praxis " + " ".join(argv)).split())[:200]  # for the register of live commands (live.py)
+    store = Store(repo.state_dir, upgrade_now=bool(args and args.upgrade_now), command=doing)
     try:
+        # Refuses, changing nothing, while commands of an older Praxis must be waited for.
+        store.need(USES.get(args.command) if args else None)
+        if store.older and not store.held_back:
+            _say("Took this project over (--upgrade-now) while commands of an older Praxis were still running in it: "
+                 f"{live.listed(store.older)}. They may stop with an error; run them again with this Praxis.")
         for row in store.agents():  # git hooks in an agent's folder can tell which agent is committing
             gitops.agent_folder(row["worktree"], row["name"], row["task"])
     except BaseException:
@@ -136,9 +177,9 @@ def run(argv: list[str]) -> int:
         return 0
     if args.command == "launcher":
         from agent_praxis import launcher
-        launcher.write_launcher(_say)
+        launcher.write_launcher(_say, switch=args.switch)
         return 0
-    ctx, store = _ctx()
+    ctx, store = _ctx(args, argv)
     try:
         cmd = args.command
         if cmd == "start":
@@ -175,6 +216,15 @@ def run(argv: list[str]) -> int:
         elif cmd == "release-stale":
             agents.release_stale(ctx, args.agents, force=args.force)
         return 0
+    except sqlite3.OperationalError as exc:
+        if store.held_back and "no such table" in str(exc):  # USES let through a command that needed more after all
+            raise PraxisError(
+                f"Older Praxis commands are still running in this project ({live.listed(store.older)}). This newer "
+                "Praxis will take over when they finish. This command stopped because it needs a part of the "
+                "project's database that only comes then: run it again when they have finished, or now with "
+                "--upgrade-now."
+            ) from exc
+        raise
     finally:
         store.close()
 

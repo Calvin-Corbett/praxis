@@ -99,6 +99,7 @@ def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS):
     handle = open(_lock_file(store, token), "a+b")  # noqa: SIM115 - locked BEFORE the row exists, so it never looks dead while alive
     mine = None
     try:
+        store.stamp(handle)  # a live heavy job with nothing written in its file belongs to an older Praxis (live.py)
         if not _try_lock(handle):
             raise RuntimeError("could not lock a brand-new heavy job file")
         with store.write() as db:

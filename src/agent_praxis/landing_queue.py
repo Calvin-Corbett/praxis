@@ -14,38 +14,16 @@ import time
 import uuid
 from pathlib import Path
 
+from agent_praxis import live
+from agent_praxis.live import held
+from agent_praxis.live import try_lock as _try_lock
+from agent_praxis.live import unlock as _unlock
 from agent_praxis.store import Store
 
-if os.name == "nt":
-    import msvcrt
-
-    def _try_lock(handle) -> bool:
-        handle.seek(0)
-        try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            return True
-        except OSError:
-            return False
-
-    def _unlock(handle) -> None:
-        handle.seek(0)
-        try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
-else:
-    import fcntl
-
-    def _try_lock(handle) -> bool:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except OSError:
-            return False
-
-    def _unlock(handle) -> None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
+# What this Praxis's `praxis land` understands of the landing line, written into its ticket file. Raise it when a
+# waiting lander must understand something new (1: the notes a batch's head writes). A ticket that says nothing is a
+# lander from before the number, and is never taken into a batch.
+PROTOCOL = 1
 
 POLL_SECONDS = 0.3
 NOTE_HEARTBEAT_SECONDS = 60  # a waiting batch member says it is still waiting this often
@@ -108,18 +86,10 @@ def ticket_alive(store: Store, token: str) -> bool:
     return held(store.dir / "queue" / f"{token}.lock")
 
 
-def held(path: Path) -> bool:
-    """True while some running process keeps the file at *path* locked."""
-    if not path.exists():
-        return False
-    try:
-        with open(path, "a+b") as handle:
-            if _try_lock(handle):
-                _unlock(handle)
-                return False
-            return True
-    except OSError:
-        return True  # cannot even open it: someone is using it
+def ticket_protocol(store: Store, token: str) -> int:
+    """The landing-line protocol the lander holding this ticket understands; 0 for a lander that does not say."""
+    facts = live.read_stamp(store.dir / "queue" / f"{token}.lock") or {}
+    return facts["protocol"] if isinstance(facts.get("protocol"), int) else 0
 
 
 def landing_now(store: Store, agent: str) -> bool:
@@ -146,6 +116,7 @@ class Ticket:
         self.dir.mkdir(parents=True, exist_ok=True)
         # Lock the file BEFORE the row exists, so nobody can ever see this ticket while it looks dead.
         self.handle = open(self._file(self.token), "a+b")
+        self.store.stamp(self.handle, protocol=PROTOCOL)
         if not _try_lock(self.handle):
             raise RuntimeError("could not lock a brand-new queue file")
         with self.store.write() as db:

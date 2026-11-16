@@ -61,10 +61,17 @@ The package is called `agent-praxis`; the command is `praxis`.
 
 **One path that survives updates.** Each Praxis version installs into its own folder, so the path of `praxis` changes
 when you update. Run `praxis launcher` once: it writes `~/.praxis/bin/praxis` (and `praxis.cmd` on Windows; set
-`PRAXIS_HOME` to use another folder than `~/.praxis`). That launcher always runs the newest Praxis you have installed,
-so you can put its full path in your agents' instructions and leave it. Run `praxis launcher` again after you
-install a new version (an older version running it never makes the launcher older; among installs of the same
-version, the one you ran `praxis launcher` from wins). The launcher only chooses which Praxis runs; an older Praxis still refuses a project that a newer one has used (see "Several versions of Praxis").
+`PRAXIS_HOME` to use another folder than `~/.praxis`). That launcher runs the Praxis you made it with, so you can put
+its full path in your agents' instructions and leave it.
+
+**The launcher never switches by itself.** After you install a new version, run `praxis launcher` once with it. That
+only registers the new install: the launcher keeps running the version it ran before, and the command tells you
+which version the launcher runs now, which is the newest, and the exact command that switches. When you choose to
+switch (best when no agent is in the middle of a landing or a heavy job), run that command:
+`praxis launcher --switch` with the new version. It points the launcher at the newest installed Praxis; among
+installs of the same version, the one you ran it from wins. If the version the launcher runs is uninstalled, the
+launcher runs the newest one that is left. The launcher only chooses which Praxis runs; see "Several versions of
+Praxis" for what keeps two versions from mixing inside one project.
 
 ---
 
@@ -204,7 +211,9 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis resume <agent>` | You answered; the agent may carry on. |
 | `praxis release-stale [agent...]` | Free the files of agents that went quiet for a long time (`--force`: even one that may still be working). |
 | `praxis setup <agent>` | Run praxis.toml's `setup` command in the agent's folder again. |
-| `praxis launcher` | Write `~/.praxis/bin/praxis`, a launcher at a fixed path that runs the newest installed Praxis. |
+| `praxis launcher` | Write `~/.praxis/bin/praxis`, a launcher at a fixed path, and register this Praxis with it. It keeps running the version it runs now; `--switch` points it at the newest installed Praxis. |
+
+Every command that works in a project also takes `--upgrade-now` (see "Several versions of Praxis").
 
 `praxis start` refuses a branch with the agent's name that Praxis did not make (it may be someone's work). Add
 `--reuse-branch` to carry on from it on purpose.
@@ -441,6 +450,34 @@ database up to date by itself, in one step that cannot be left half-done. An old
 from a newer one refuses every command ("this project was used by a newer Praxis") instead of guessing, so
 several Praxis versions can be installed side by side safely.
 
+**A newer Praxis never takes a project over while older commands are still running in it.** A landing or a heavy
+job can run for hours, and it checked the database's format when it started. So before a newer Praxis brings a
+project's database up to date, it looks for commands of an older Praxis that are still running there:
+
+- Every Praxis command keeps a small locked file in `.git/praxis/procs/` while it runs, saying its process number,
+  the database format it knows, its version and the command. The operating system frees the lock when the process
+  ends, however it ends, so a command that crashed is never counted as running.
+- A Praxis from before this register is found by what it does keep locked: its place in the landing line and its
+  heavy jobs.
+
+While any of them is running, the newer Praxis leaves the database as it is. `praxis status` still shows the
+project (with a line at the top naming the older commands), and commands that only use what the older database
+already has (`claim`, `start`, `done`, `blocked` and so on) work as usual. A command that needs the new format
+(`praxis land`, for one) changes nothing, exits with code 1 and says:
+
+```
+Older Praxis commands are still running in this project (praxis land alice (pid 4242, Praxis 0.4.0); ...).
+This newer Praxis will take over when they finish. Nothing was changed.
+```
+
+Run it again when they have finished; the first command after that brings the database up to date. To take over
+at once, add `--upgrade-now` to any command (for example `praxis status --upgrade-now`): the older commands may
+then stop with an error, so use it only when you know they can be run again.
+
+A landing with a newer Praxis also never takes a landing of an older Praxis into its batch (see "Batched
+landings"): each `praxis land` writes into its place in the line which batch messages it understands, and one that
+says nothing, or less than the batch needs, lands on its own turn.
+
 ---
 
 ## When Praxis needs you
@@ -502,6 +539,12 @@ so Praxis leaves it alone. Pick another name, or add `--reuse-branch` to carry o
 **"This project was used by a newer Praxis"**
 A newer Praxis has used this project, and this one does not know its database format. Update Praxis, or use the
 newer one for this project.
+
+**"Older Praxis commands are still running in this project"**
+You ran a newer Praxis while commands of an older one (the message lists them) are still at work in the project.
+The newer Praxis changed nothing and takes over when they finish: run your command again then. If a listed command
+is stuck or no longer wanted, stop it; if you must take over right now, add `--upgrade-now` to your command (the
+older commands may then stop with an error). See "Several versions of Praxis".
 
 **"its changes clash with newer work"**
 Another agent landed a change to the same lines first; the message names whose landing when Praxis can tell.
@@ -588,6 +631,7 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 
 - `praxis.toml`, `AGENTS.md`, `CLAUDE.md`: in your project, committed so every agent folder has them.
 - Claims, locks, the landing line and the history: in `.git/praxis/`, never committed.
+- One small file for each Praxis command that is running right now: in `.git/praxis/procs/`. Praxis removes them.
 - Ignored files kept from removed agent folders: in `.git/praxis/kept/`. Delete them when you no longer need
   them.
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import

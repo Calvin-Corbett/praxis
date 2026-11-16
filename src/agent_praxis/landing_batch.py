@@ -24,7 +24,7 @@ from pathlib import Path
 
 from agent_praxis import enough, generated, gitops, hooks
 from agent_praxis.agents import Ctx, _tree, folder_state, off_branch
-from agent_praxis.landing_queue import clear_note, read_note, ticket_alive, write_note
+from agent_praxis.landing_queue import PROTOCOL, clear_note, read_note, ticket_alive, ticket_protocol, write_note
 
 MARKERS = "batches"
 
@@ -176,6 +176,8 @@ def _followers(ctx: Ctx, row, ticket) -> list[Member]:
             continue
         if not ticket_alive(ctx.store, q["token"]) or read_note(ctx.store, q["token"]) is not None:
             continue
+        if ticket_protocol(ctx.store, q["token"]) < PROTOCOL:
+            continue  # an older Praxis is landing it and would not understand the batch: it lands on its own turn
         other = ctx.store.agent(q["agent"])
         if other is None or other["paused"]:
             continue

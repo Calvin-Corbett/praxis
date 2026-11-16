@@ -3,15 +3,21 @@
 It lives in `<git folder>/praxis/praxis.db`, so every worktree sees the same claims, locks and queue, and
 none of it is ever committed. Writes take SQLite's write lock up front (BEGIN IMMEDIATE), so two agents
 claiming the same file at the same moment cannot both win.
+
+Every Store registers its process as at work in the project (live.py) before it reads the database, and a database is
+never brought up to a newer format while commands of an older Praxis are still running in the project.
 """
 
 from __future__ import annotations
 
+import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from agent_praxis import __version__, live
 from agent_praxis.errors import PraxisError
 
 # The database's format number (kept in SQLite's user_version). Raise it whenever the tables change, and add the
@@ -130,15 +136,37 @@ def _statements(script: str) -> list[str]:
     return [part.strip() for part in script.split(";") if part.strip()]
 
 
+def added_in(table: str) -> int:
+    """The format that brought *table*: 1 for the first tables, else the number of the upgrade step that makes it."""
+    for number, script in UPGRADES.items():
+        if table in re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", script):
+            return number
+    return 1
+
+
 class Store:
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, upgrade_now: bool = False, command: str = ""):
+        """*command* is what this process is doing, in words for a person (live.py keeps it while the Store is open).
+        *upgrade_now* brings the database up to FORMAT even while commands of an older Praxis are still running."""
         self.dir = state_dir
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.dir / "praxis.db"), timeout=60, isolation_level=None)
-        self.conn.row_factory = sqlite3.Row
-        self._refuse_newer(self._format())
-        if self._format() < FORMAT:
-            self._upgrade()
+        self.format = 0  # the format the database is at, as far as this Store knows
+        self.older: list[str] = []  # live commands of an older Praxis this Store found when it wanted to upgrade
+        self.held_back = False  # True when the database was left at an older format because of them
+        self.conn = None
+        # Registered BEFORE the format is read: a newer Praxis that upgrades holds the whole database while it looks
+        # at the register, so it either sees this process there or this process sees the newer format and refuses.
+        self._registration = live.register(self.dir, FORMAT, __version__, command or "a Praxis command")
+        try:
+            self.conn = sqlite3.connect(str(self.dir / "praxis.db"), timeout=60, isolation_level=None)
+            self.conn.row_factory = sqlite3.Row
+            self.format = self._format()
+            self._refuse_newer(self.format)
+            if self.format < FORMAT:
+                self._upgrade(upgrade_now)
+        except BaseException:
+            self.close()
+            raise
 
     def _format(self) -> int:
         return int(self._retry(lambda: self.conn.execute("PRAGMA user_version").fetchone()[0]))
@@ -151,22 +179,57 @@ class Store:
                 "older. Update Praxis (or use the newer one) for this project. Nothing was changed."
             )
 
-    def _upgrade(self) -> None:
+    def _upgrade(self, now: bool = False) -> None:
         """Bring a new or older database up to FORMAT, all in one transaction: another process upgrading at the same
-        moment waits, then finds nothing left to do."""
-        with self.write() as db:
+        moment waits, then finds nothing left to do.
+
+        Not while commands of an older Praxis are still running in the project (unless *now*): they checked the
+        format when they started and would carry on in a database they do not know. Then the database is left as it
+        is, and `older` says who they are. The transaction holds the whole database (readers too), so no command can
+        read the old format while this one decides.
+        """
+        with self.write(exclusive=True) as db:
             found = int(db.execute("PRAGMA user_version").fetchone()[0])
             self._refuse_newer(found)
+            self.format = found
             if found >= FORMAT:
                 return
+            in_use = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'").fetchone()
+            if in_use:  # a brand-new database has nobody to take it from
+                self.older = live.older_commands(self.dir, db, FORMAT, self._registration[0])
+                if self.older and not now:
+                    self.held_back = True
+                    return
             steps = [SCHEMA] + [UPGRADES[n] for n in range(max(found, 1) + 1, FORMAT + 1)]
             for script in steps:
                 for statement in _statements(script):
                     db.execute(statement)
             db.execute(f"PRAGMA user_version = {FORMAT}")
+            self.format = FORMAT
+
+    def stamp(self, handle, **more) -> None:
+        """Write who holds a brand-new lock file (a landing-line ticket, a heavy job) into it, BEFORE it is locked. A
+        live one with nothing written in it then belongs to a Praxis from before the register (live.py)."""
+        live.stamp(handle, pid=os.getpid(), format=FORMAT, version=__version__, **more)
+
+    def has(self, table: str) -> bool:
+        """False only when *table* comes with a format the database was not brought up to (see _upgrade)."""
+        return self.format >= added_in(table)
+
+    def need(self, tables=None) -> None:
+        """Refuse, changing nothing, when the database was left at an older format and lacks one of *tables* (None:
+        the caller may use every table). A command that only uses tables the database has carries on."""
+        wanted = FORMAT if tables is None else max([1, *(added_in(table) for table in tables)])
+        if self.format < wanted:
+            raise PraxisError(live.refusal(self.older))
 
     def close(self) -> None:
-        self.conn.close()
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
+        if self._registration is not None:
+            live.unregister(self._registration)
+            self._registration = None
 
     @staticmethod
     def _retry(fn):
@@ -180,8 +243,8 @@ class Store:
                 time.sleep(0.2)
 
     @contextmanager
-    def write(self):
-        self._retry(lambda: self.conn.execute("BEGIN IMMEDIATE"))
+    def write(self, exclusive: bool = False):
+        self._retry(lambda: self.conn.execute("BEGIN EXCLUSIVE" if exclusive else "BEGIN IMMEDIATE"))
         try:
             yield self.conn
         except BaseException:

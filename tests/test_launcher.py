@@ -1,4 +1,4 @@
-"""The stable launcher: one fixed per-user path that runs the newest installed Praxis."""
+"""The stable launcher: one fixed per-user path that runs an installed Praxis, and never switches by itself."""
 
 from __future__ import annotations
 
@@ -62,11 +62,81 @@ def test_the_launcher_runs_this_praxis(home):
     assert done.returncode == 0 and done.stdout.startswith("praxis "), done.stdout + done.stderr
 
 
+def _launcher_from(monkeypatch, python: Path, version: str, *args: str) -> str:
+    """Run `praxis launcher` as the install at *python* (of *version*) would; returns what it printed."""
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "executable", str(python))
+        patch.setattr(launcher, "__version__", version)
+        code, out = praxis("launcher", *args)
+    assert code == 0, out
+    return out
+
+
+def test_a_newly_installed_version_registers_but_does_not_take_the_launcher(home, tmp_path, monkeypatch):
+    old = _fake_python(tmp_path / "old", "OLD")
+    new = _fake_python(tmp_path / "new", "NEW")
+    _launcher_from(monkeypatch, old, "0.4.0")
+    assert _run(home).stdout.startswith("OLD")
+    out = _launcher_from(monkeypatch, new, "0.5.0")  # the new version is installed and registers itself
+    assert _run(home, "status").stdout.startswith("OLD -m agent_praxis status"), "the launcher was left as it was"
+    assert f"It runs Praxis 0.4.0 ({old}) now, and was left on it." in out
+    assert f"is Praxis 0.5.0 ({new})" in out
+    command = next(line for line in out.splitlines() if line.endswith("-m agent_praxis launcher --switch"))
+    assert command.strip().strip('"').startswith(str(new)), "the exact command to switch, run with the newest"
+    assert [i["python"] for i in json.loads((home / "installs.json").read_text())] == [str(old), str(new)]
+
+
+def test_switch_points_the_launcher_at_the_newest(home, tmp_path, monkeypatch):
+    old = _fake_python(tmp_path / "old", "OLD")
+    new = _fake_python(tmp_path / "new", "NEW")
+    _launcher_from(monkeypatch, old, "0.4.0")
+    _launcher_from(monkeypatch, new, "0.5.0")
+    out = _launcher_from(monkeypatch, new, "0.5.0", "--switch")
+    assert _run(home).stdout.startswith("NEW")
+    assert f"Switched: it ran {old} before." in out and f"It runs Praxis 0.5.0 ({new}) now: the newest" in out
+    assert "--switch" not in out.split("After installing")[0], "nothing left to switch to"
+    out = _launcher_from(monkeypatch, old, "0.4.0", "--switch")  # asked from the older install: still the newest
+    assert _run(home).stdout.startswith("NEW") and "Switched" not in out
+
+
+def test_the_first_launcher_runs_the_praxis_that_made_it_even_when_a_newer_one_is_known(home, tmp_path, monkeypatch):
+    here = _fake_python(tmp_path / "here", "HERE")
+    newer = _fake_python(tmp_path / "newer", "NEWER")
+    _registry(home, ("9.0.0", newer))
+    out = _launcher_from(monkeypatch, here, "0.4.0")
+    assert _run(home).stdout.startswith("HERE")
+    assert str(newer) in out and "-m agent_praxis launcher --switch" in out
+
+
+def test_when_the_kept_version_is_uninstalled_the_newest_one_left_runs(home, tmp_path, monkeypatch):
+    kept = _fake_python(tmp_path / "kept", "KEPT")
+    low = _fake_python(tmp_path / "low", "LOW")
+    high = _fake_python(tmp_path / "high", "HIGH")
+    _launcher_from(monkeypatch, kept, "0.4.0")
+    _launcher_from(monkeypatch, low, "0.5.0")
+    _launcher_from(monkeypatch, high, "0.6.0")
+    assert _run(home).stdout.startswith("KEPT")
+    kept.unlink()  # the version the launcher was left on is uninstalled
+    assert _run(home).stdout.startswith("HIGH")
+    out = _launcher_from(monkeypatch, low, "0.5.0")  # and the launcher now stays on what it runs
+    assert _run(home).stdout.startswith("HIGH") and f"It runs Praxis 0.6.0 ({high}) now: the newest" in out
+
+
+def test_a_launcher_program_the_list_of_installs_forgot_is_still_kept(home, tmp_path, monkeypatch):
+    old = _fake_python(tmp_path / "old", "OLD")
+    new = _fake_python(tmp_path / "new", "NEW")
+    _launcher_from(monkeypatch, old, "0.4.0")
+    (home / "installs.json").write_text("{not json")
+    out = _launcher_from(monkeypatch, new, "0.5.0")
+    assert _run(home).stdout.startswith("OLD")
+    assert f"It runs {old} now, and was left on it." in out
+
+
 def test_it_runs_the_newest_known_version_and_passes_arguments_and_exit_code_on(home, tmp_path):
     older = _fake_python(tmp_path / "old", "OLD")
     newer = _fake_python(tmp_path / "new", "NEW")
     _registry(home, ("0.9.0", older), ("9.10.0", newer), ("9.2.0", older))
-    praxis("launcher")
+    praxis("launcher", "--switch")
     done = _run(home, "status", "two words")
     assert done.stdout.startswith("NEW -m agent_praxis status") and "two words" in done.stdout, done.stdout
     assert done.returncode == 7
@@ -74,9 +144,11 @@ def test_it_runs_the_newest_known_version_and_passes_arguments_and_exit_code_on(
 
 def test_running_it_from_an_older_version_never_makes_the_launcher_older(home, tmp_path, monkeypatch):
     newer = _fake_python(tmp_path / "new", "NEW")
-    _registry(home, ("99.0.0", newer))
+    _launcher_from(monkeypatch, newer, "99.0.0")
     monkeypatch.setattr(launcher, "__version__", "0.1.0")
     praxis("launcher")
+    assert _run(home).stdout.startswith("NEW")
+    praxis("launcher", "--switch")
     assert _run(home).stdout.startswith("NEW")
 
 
@@ -95,6 +167,8 @@ def test_equal_versions_the_one_you_run_it_from_goes_first(home, tmp_path, monke
     assert [i["python"] for i in json.loads((home / "installs.json").read_text())] == [str(first), str(second)]
     monkeypatch.setattr(sys, "executable", str(first))  # now run from the first install: it is the most recent
     praxis("launcher")
+    assert _run(home).stdout.startswith("SECOND"), "registering alone never switches"
+    praxis("launcher", "--switch")
     assert _run(home).stdout.startswith("FIRST")
     assert [i["python"] for i in json.loads((home / "installs.json").read_text())] == [str(second), str(first)]
 
@@ -118,7 +192,7 @@ def test_a_removed_version_is_skipped_and_the_next_newest_runs(home, tmp_path):
     kept = _fake_python(tmp_path / "kept", "KEPT")
     gone = _fake_python(tmp_path / "gone", "GONE")
     _registry(home, ("98.0.0", kept), ("99.0.0", gone))
-    praxis("launcher")
+    praxis("launcher", "--switch")
     gone.unlink()  # that version is uninstalled later
     assert _run(home).stdout.startswith("KEPT")
 
@@ -126,7 +200,9 @@ def test_a_removed_version_is_skipped_and_the_next_newest_runs(home, tmp_path):
 def test_paths_with_spaces_work(home, tmp_path):
     fake = _fake_python(tmp_path / "a folder with spaces", "SPACED")
     _registry(home, ("99.0.0", fake))
-    praxis("launcher")
+    out = praxis("launcher")[1]
+    assert f'"{fake}" -m agent_praxis launcher --switch' in out, "a path with a space is quoted in the command"
+    praxis("launcher", "--switch")
     assert _run(home).stdout.startswith("SPACED")
 
 

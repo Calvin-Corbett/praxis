@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from agent_praxis import generated, identity, paths
+from agent_praxis import generated, identity, live, paths
 from agent_praxis.agents import Ctx, agent_here, folder_state, look_at_agents, stale_agents
 from agent_praxis.landing_queue import batch_of, ticket_alive
 
@@ -49,6 +49,13 @@ def render(ctx: Ctx) -> str:
     if here:
         out.append(f"You are in {here}'s folder. The main project folder is {ctx.repo.root}")
     out.append("")
+    if store.held_back:
+        out.append(f"OLDER PRAXIS COMMANDS ARE STILL RUNNING HERE: {live.listed(store.older)}.")
+        out.append("  This newer Praxis left the project's database as it is and shows what it holds. It takes over "
+                   "when they finish.")
+        out.append("  Until then a command that needs the newer database (`praxis land`) says so and changes nothing: "
+                   "run it again when they have finished.")
+        out.append("")
 
     looks = look_at_agents(ctx, agents)  # every agent's folder read once, in a few threads
     paused = [a for a in agents if a["paused"]]
@@ -184,7 +191,7 @@ def _checks_lines(ctx) -> list[str]:
         for n, entry in enumerate(ctx.cfg.checks, 1):
             out.append(f"  {n}. {', '.join(entry['paths'])}: {entry['run']}")
         out.append(f"  default: {ctx.cfg.check or '(none)'}")
-    kept = checkcache.count(ctx.store)
+    kept = checkcache.count(ctx.store) if ctx.store.has("checkcache") else 0
     if kept:
         out.append(f"{'  ' if out else 'CHECK CACHE: '}{kept} passed check(s) remembered: the same tree is not "
                    "checked twice with the same command")
@@ -234,6 +241,8 @@ def _full_check_lines(ctx, now: float) -> list[str]:
 def _heavy_lines(ctx, now: float) -> list[str]:
     from agent_praxis import heavy
 
+    if not ctx.store.has("heavy"):  # the database was left at an older Praxis's format (store.py)
+        return []
     jobs = heavy.rows(ctx.store)
     if ctx.cfg.heavy_jobs == "auto":
         limit, why = heavy.limit_now(ctx)

@@ -53,9 +53,32 @@
   `praxis run --heavy`.
 - **One stable launcher for every version.** Each Praxis version installs into its own folder, so a path you gave your
   agents stopped working after an update. Run `praxis launcher` once and you get `~/.praxis/bin/praxis` (and
-  `praxis.cmd` on Windows) that always runs the newest Praxis you have installed. Use that path in your agents'
-  instructions. Run `praxis launcher` again after installing a new version. The launcher only picks which Praxis to
-  run: an older Praxis still refuses a project a newer one has used, so versions never mix.
+  `praxis.cmd` on Windows), one fixed path that runs an installed Praxis. Use that path in your agents'
+  instructions. The launcher only picks which Praxis to run: an older Praxis still refuses a project a newer one
+  has used, so versions never mix.
+- **The launcher never switches by itself.** After you install a new version, `praxis launcher` run with it only
+  registers that install. The launcher keeps running the version it ran before, and the command tells you which
+  version the launcher runs now, which is the newest, and the exact command that switches. Run
+  `praxis launcher --switch` when you choose to: it points the launcher at the newest installed Praxis. The first
+  `praxis launcher` on a machine still points the launcher at the Praxis you ran it with, and when the version the
+  launcher runs is uninstalled, it runs the newest one that is left. Before, running `praxis launcher` with a new
+  version repointed the launcher at once, in the middle of whatever your agents were doing.
+- **A newer Praxis never takes a project over while older commands are still running in it.** Every Praxis command
+  now keeps a small locked file in `.git/praxis/procs/` while it runs (its process number, the database format it
+  knows, its version and the command); the operating system frees the lock when the process ends, so a crashed
+  command is never counted. Before a newer Praxis upgrades your project's database it looks there, and (for a
+  Praxis from before this change, which does not register) at the live places in the landing line and the live
+  heavy jobs. While any older command is running, the database is left as it is: `praxis status` still shows the
+  project and names the older commands, commands that only use what the older database has (`claim`, `start`,
+  `done` and so on) work as usual, and a command that needs the new format (`praxis land`) changes nothing, exits
+  with code 1 and says "Older Praxis commands are still running in this project (...). This newer Praxis will take
+  over when they finish. Nothing was changed." Add `--upgrade-now` to any command to take over at once. Before, a
+  routine `praxis status` through the launcher could upgrade the database under landings and heavy jobs that an
+  older Praxis had been running for hours. The database format does not change for this.
+- **A batch never takes a landing of an older Praxis.** Each `praxis land` now writes into its place in the landing
+  line which batch messages it understands. The agent at the front only takes agents behind it whose `praxis land`
+  understands the batch; a landing started by an older Praxis says nothing there, is left out, and lands on its own
+  turn as it always did.
 - **`after_done`** in `praxis.toml`: a command run in the main folder after `praxis done` finishes an agent (also after
   `praxis land --done`). Praxis sets `PRAXIS_AGENT` and `PRAXIS_TASK` for it. If it fails you get a warning, and the
   agent stays done.
@@ -77,9 +100,10 @@
   `generated` rebuild or heavy job now starts with the command as you wrote it and a `Program:` line with the full
   path of the file that was started (and the shell that started it), so you can see which `bash`, `python` or `npm`
   it really was.
-- **The launcher runs the install you ran it from.** When two installs had the same version, `praxis launcher` could
-  write a launcher that ran the older install. Now, among equal versions, the install you ran `praxis launcher` from
-  wins, then the one registered most recently. A lower version still always loses to a higher one.
+- **Among installs of the same version, the one you switch from wins.** When two installs had the same version,
+  `praxis launcher` could write a launcher that ran the older install. Now, when `praxis launcher --switch` picks
+  the newest, the install you ran it from wins among equal versions, then the one registered most recently. A lower
+  version still always loses to a higher one.
 - The project database is now format 3 (a new table for the heavy jobs). Praxis upgrades it by itself the first time
   it runs; an older Praxis then refuses the project instead of guessing.
 - **Praxis's own tests run across CPU cores.** `pip install ".[test]"` now also installs pytest-xdist, and
