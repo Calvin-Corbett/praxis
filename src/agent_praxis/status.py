@@ -202,6 +202,8 @@ def _full_check_needs_you(ctx, now: float) -> list[str]:
     """The full check's last word on the main version, when it is not "passed": what broke it and how to undo it."""
     from agent_praxis import fullcheck
 
+    if not ctx.store.has("fullchecks"):  # the database was left at an older Praxis's format (store.py)
+        return []
     row = fullcheck.failing(ctx)
     if row is None:
         return []
@@ -213,7 +215,7 @@ def _full_check_lines(ctx, now: float) -> list[str]:
     from agent_praxis import fullcheck
 
     cmd = fullcheck.command(ctx.cfg)
-    if not cmd:
+    if not cmd or not ctx.store.has("fullchecks"):
         return []
     every, store = ctx.cfg.full_check_every, ctx.store
     often = f"after every {every} landing(s)" if every else "only when you ask"

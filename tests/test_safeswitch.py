@@ -208,6 +208,25 @@ def test_a_registered_older_command_keeps_the_database_as_it_is(alice):
     assert db_format(alice) == store.FORMAT and tables(alice) >= NEWEST
 
 
+def test_status_shows_no_section_whose_table_the_older_database_lacks(alice):
+    """Every section of the status page that reads a table of the newest format is left out, not an error."""
+    toml = alice / "praxis.toml"
+    lines = [line for line in toml.read_text().splitlines() if not line.startswith(("full_check =", "heavy_jobs ="))]
+    lines += ["full_check = 'echo full'", 'heavy_jobs = "auto"']
+    toml.write_text("\n".join(lines) + "\n")
+    downgrade(alice, 2)
+    ghost = older_registered(alice, fmt=2)
+    try:
+        code, out = praxis("status")
+        assert code == 0 and "OLDER PRAXIS COMMANDS ARE STILL RUNNING" in out and "alice" in out, out
+        assert "FULL CHECK" not in out and "HEAVY JOBS" not in out and "CHECK CACHE" not in out
+        assert db_format(alice) == 2
+    finally:
+        let_go(ghost)
+    code, out = praxis("status")
+    assert code == 0 and "FULL CHECK" in out and "HEAVY JOBS" in out and db_format(alice) == store.FORMAT, out
+
+
 def test_an_older_landing_waiting_in_line_keeps_the_database_as_it_is(alice):
     """A Praxis from before the register: all it keeps is its locked, empty ticket file."""
     downgrade(alice)
