@@ -135,10 +135,28 @@ def link_shares(ctx, folder: Path) -> list[str]:
         except OSError as exc:
             ctx.say(f"Warning: could not link {rel} into the agent's folder ({exc}).")
             continue
+        ignore_the_link(folder, rel)
         linked.append(rel)
     if linked:
         ctx.say("Shared from the main folder (one copy for every agent, linked, not copied): " + ", ".join(linked))
     return linked
+
+
+def ignore_the_link(folder: Path, rel: str) -> None:
+    """Make git ignore the link itself. A `.gitignore` line like `node_modules/` matches only folders, and to git a
+    symbolic link (Linux, macOS) is a file, so without this git would save the link as the agent's work and land it.
+    The exact path goes into the project's own exclude list (.git/info/exclude, never committed, shared by the main
+    folder and every agent folder), where the main folder's real folder is ignored already anyway."""
+    if gitops.is_ignored(folder, rel):
+        return
+    common = Path(gitops.out(["rev-parse", "--path-format=absolute", "--git-common-dir"], folder))
+    exclude = common / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    line = "/" + rel
+    old = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if line not in old.splitlines():
+        with exclude.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(("" if not old or old.endswith("\n") else "\n") + f"# linked into agent folders by praxis share\n{line}\n")
 
 
 def make_link(source: Path, target: Path) -> None:

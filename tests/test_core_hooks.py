@@ -372,6 +372,19 @@ def _shared_packages(project: Path) -> Path:
     return package
 
 
+def test_a_shared_link_is_never_the_agents_work_and_never_lands(project):
+    """`node_modules/` in .gitignore matches only folders; on Linux and macOS the link is a symbolic link, which git
+    sees as a file. The link must still be ignored, so it is never saved as the agent's work or landed on main."""
+    _shared_packages(project)
+    assert praxis("start", "alice", "jump", "scripts/player.gd")[0] == 0
+    agent = folder(project, "alice")
+    assert git(agent, "status", "--porcelain").stdout.strip() == ""
+    edit(agent / "scripts" / "player.gd", "extends Node\nvar speed = 12\n")
+    assert praxis("land", "alice")[0] == 0
+    assert git(project, "ls-files", "node_modules").stdout.strip() == ""
+    assert praxis("done", "alice")[0] == 0
+
+
 def test_shared_folders_are_linked_and_survive_done_and_abandon(project):
     from agent_praxis import agents
     package = _shared_packages(project)
