@@ -378,10 +378,10 @@ def test_a_shared_link_is_never_the_agents_work_and_never_lands(project):
     _shared_packages(project)
     assert praxis("start", "alice", "jump", "scripts/player.gd")[0] == 0
     agent = folder(project, "alice")
-    assert git(agent, "status", "--porcelain").stdout.strip() == ""
+    assert git(agent, "status", "--porcelain").strip() == ""
     edit(agent / "scripts" / "player.gd", "extends Node\nvar speed = 12\n")
     assert praxis("land", "alice")[0] == 0
-    assert git(project, "ls-files", "node_modules").stdout.strip() == ""
+    assert git(project, "ls-files", "node_modules").strip() == ""
     assert praxis("done", "alice")[0] == 0
 
 
