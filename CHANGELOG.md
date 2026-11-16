@@ -7,6 +7,18 @@
   test:ui" }, ...]` to `praxis.toml`. For a landing Praxis runs the command of the FIRST entry whose `paths` match
   any file the landing changes, and your normal `check` when none does, so put the strictest entries first. Without
   `checks` nothing changes. The landing output and `praxis status` name the check that was used.
+- **A full check that runs every so often, and finds the landing that broke it.** Quick checks are only safe with a
+  net behind them. Set `full_check = "<the command that tests the whole project>"` in `praxis.toml`, and
+  `full_check_every = N` to have Praxis start it in the background after every N landings that did not run that
+  exact command themselves (`0`, the default: only when you ask). `praxis fullcheck` runs it now (`--background`
+  returns at once). It runs on the main version in a scratch folder of its own (`<project>-praxis/_fullcheck`), never
+  in your main folder and never holding up the landing line, takes a heavy job place, opens no window and logs to
+  `.git/praxis/logs/full-check-*.log`. When it fails, Praxis searches the landings since the last pass the way
+  `git bisect` does, one run per step, and `praxis status` shows under NEEDS YOU whose landing broke it, the commit,
+  the log, and the exact `git revert` command. Praxis never undoes a landing by itself. If its process is cut short,
+  the next landing notices and starts it again. This needs database format 5: Praxis upgrades your project's
+  database the first time the new version opens it (one new table, `fullchecks`), and an older Praxis then refuses
+  that project (update it, or use the launcher).
 - **A check that already passed is not run twice.** If the exact tree Praxis is about to land already passed the same
   check command, you now see "Skipping the check: same tree already passed at <time>" and the landing goes on. A
   different command text never reuses a pass, a failure is never remembered, and the newest 200 passes are kept in

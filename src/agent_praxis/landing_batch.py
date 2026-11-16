@@ -330,6 +330,7 @@ class _Run:
         self.failed: dict[str, tuple[int, str, str]] = {}  # candidate tree -> (check exit code, output, log): it failed
         self.size = len(marker["members"])
         self.last_landed: str | None = None
+        self.used = ""  # the check command the newest candidate was checked with
 
     # building the candidate --------------------------------------------------------------------------------------
 
@@ -407,6 +408,7 @@ class _Run:
 
         ctx, folder = self.ctx, self.folder
         command = ctx.cfg.check_for(gitops.changed_between(folder, base, "HEAD"))[0].strip()
+        self.used = command
         if not command:
             return 0, "", None
         checked = gitops.rev(folder, "HEAD")
@@ -560,6 +562,7 @@ class _Run:
         final = gitops.rev(self.root, self.main_ref) or tip
         for m in built:
             hooks.run_after_land(m.ctx, m.row, final)
+        L._full_check_after(ctx, self.used, tip)
         for m in built:
             self._decide(m, "landed", ok=True, commit=tip)
         return True

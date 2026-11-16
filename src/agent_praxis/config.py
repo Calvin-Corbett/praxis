@@ -55,6 +55,8 @@ class Config:
     batch_max: int = 4
     generated: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
+    full_check: str = ""  # the command that proves the WHOLE project works: the safety net behind `checks`
+    full_check_every: int = 0  # run it after this many landings that did not run it themselves; 0: only on demand
 
     def check_for(self, changed: list[str]) -> tuple[str, str]:
         """(the check command, its name) for a landing that changes the files *changed*: the command of the FIRST
@@ -163,6 +165,15 @@ checks = [{_checks(cfg.checks)}]
 # check for the whole batch, and if it fails Praxis halves the batch to find the one that broke it. 1 turns
 # batching off (one landing at a time).
 batch_max = {cfg.batch_max}
+
+# The full check: the command that proves the WHOLE project works (the complete test suite, say). It is the safety
+# net that makes quick `checks` safe to rely on. `praxis fullcheck` runs it now, on the main version, in a scratch
+# folder of its own, never in the main folder and never holding up landings. With full_check_every = N, Praxis
+# also starts it in the background after every N landings that did not run this exact command themselves (0: only
+# when you ask). If it fails, Praxis finds which landing broke it and `praxis status` says so under NEEDS YOU,
+# with the exact `git revert` command. Praxis never undoes a landing by itself.
+full_check = {_q(cfg.full_check)}
+full_check_every = {cfg.full_check_every}
 
 # Files a command makes from other files. Nobody claims or edits them: after each landing that changes one
 # of the `from` files, Praxis runs the command in the main folder and commits the new file, for example
@@ -361,6 +372,19 @@ def load(root: Path) -> Config:
         raise PraxisError("praxis.toml: heavy_max must be 1 or more (or leave it out).")
     if cfg.batch_max < 1:
         raise PraxisError("praxis.toml: batch_max must be 1 or more (1 turns batching off).")
+    if cfg.full_check_every < 0:
+        raise PraxisError("praxis.toml: full_check_every must be 0 (only when you ask) or more.")
+    if cfg.full_check_every and not cfg.full_check.strip():
+        raise PraxisError(
+            f"praxis.toml: full_check_every is {cfg.full_check_every}, but full_check is empty, so there is no "
+            'full check to run. Set full_check = "<the command that tests the whole project>", or set '
+            "full_check_every = 0."
+        )
+    if any(ch in cfg.full_check for ch in CONTROL):
+        raise PraxisError(
+            "praxis.toml: the full_check line holds a hidden control character (a backslash inside double quotes "
+            "starts a code in TOML). Use forward slashes, or single quotes."
+        )
     if cfg.land_method not in ("rebase", "merge"):
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
     _check_branch_prefix(cfg.branch_prefix)
@@ -479,7 +503,7 @@ _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": 
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str, "shell_fix": bool,
           "setup": str, "share": list, "after_land": str, "after_done": str, "commit_trailers": list,
           "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
-          "generated": "tables", "checks": "tables"}
+          "generated": "tables", "checks": "tables", "full_check": str, "full_check_every": int}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',

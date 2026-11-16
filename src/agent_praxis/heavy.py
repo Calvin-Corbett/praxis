@@ -9,6 +9,7 @@ a crashed job never holds a place. Nobody's wait times out.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import time
@@ -82,20 +83,17 @@ def _inside_heavy_job(store: Store) -> bool:
     return bool(rows) and bool(rows[0]["started"]) and alive(store, token)
 
 
-def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
-    """Wait for a free heavy place, run *command*, return its exit code."""
-    if command and command[0] == "--":
-        command = command[1:]
-    if not command:
-        raise PraxisError("Give the command to run, for example: praxis run --heavy pytest")
+@contextlib.contextmanager
+def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS):
+    """Hold a heavy job place for as long as the `with` block runs, waiting in line for it first. Gives
+    (the place's row id, its token). Inside a heavy job of this project it takes no place and gives (None, the outer
+    job's token): queueing there would hold one place while waiting for another, and two such jobs at the limit
+    would wait for each other forever."""
     store = ctx.store
-    agent = os.environ.get("PRAXIS_AGENT") or agents.agent_here(ctx) or "(nobody)"
-    text = command[0] if len(command) == 1 else subprocess.list2cmdline(command)
     if _inside_heavy_job(store):
-        # Queueing here would hold a place while waiting for another: two such jobs at the limit would wait for each
-        # other forever. The outer job already holds a place, so run directly and take none.
         ctx.say("Already inside a heavy job: running this command directly, without taking another place.")
-        return _execute(ctx, command, text, agent, None, os.environ[TOKEN_ENV])
+        yield None, os.environ[TOKEN_ENV]
+        return
     token = uuid.uuid4().hex
     (store.dir / "heavy").mkdir(parents=True, exist_ok=True)
     handle = open(_lock_file(store, token), "a+b")  # noqa: SIM115 - locked BEFORE the row exists, so it never looks dead while alive
@@ -123,7 +121,7 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
                     "Praxis waits as long as it takes; this is normal."
                 )
             time.sleep(poll)
-        return _execute(ctx, command, text, agent, mine, token)
+        yield mine, token
     finally:
         if mine is not None:
             with store.write() as db:
@@ -134,6 +132,18 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
             _lock_file(store, token).unlink()
         except OSError:
             pass
+
+
+def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
+    """Wait for a free heavy place, run *command*, return its exit code."""
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise PraxisError("Give the command to run, for example: praxis run --heavy pytest")
+    agent = os.environ.get("PRAXIS_AGENT") or agents.agent_here(ctx) or "(nobody)"
+    text = command[0] if len(command) == 1 else subprocess.list2cmdline(command)
+    with place(ctx, agent, text, poll) as (mine, token):
+        return _execute(ctx, command, text, agent, mine, token)
 
 
 def _execute(ctx, command: list[str], text: str, agent: str, mine: int | None, token: str) -> int:

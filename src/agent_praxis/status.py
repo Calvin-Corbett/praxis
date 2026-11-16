@@ -53,8 +53,10 @@ def render(ctx: Ctx) -> str:
     looks = look_at_agents(ctx, agents)  # every agent's folder read once, in a few threads
     paused = [a for a in agents if a["paused"]]
     stale = stale_agents(ctx, now, {n: look.activity for n, look in looks.items() if look.error is None})
-    if paused or stale:
+    broken = _full_check_needs_you(ctx, now)
+    if paused or stale or broken:
         out.append("NEEDS YOU")
+        out += broken
         for a in paused:
             out.append(f"  - {a['name']} is paused and waiting for you (since {ago(a['paused_at'], now)}).")
             out.append(f"      Why: {a['paused']}")
@@ -143,6 +145,7 @@ def render(ctx: Ctx) -> str:
     out.append("")
 
     out += _checks_lines(ctx)
+    out += _full_check_lines(ctx, now)
     out += _heavy_lines(ctx, now)
 
     out.append("LANDING LINE" if line else "LANDING LINE: empty")
@@ -186,6 +189,46 @@ def _checks_lines(ctx) -> list[str]:
         out.append(f"{'  ' if out else 'CHECK CACHE: '}{kept} passed check(s) remembered: the same tree is not "
                    "checked twice with the same command")
     return [*out, ""] if out else []
+
+
+def _full_check_needs_you(ctx, now: float) -> list[str]:
+    """The full check's last word on the main version, when it is not "passed": what broke it and how to undo it."""
+    from agent_praxis import fullcheck
+
+    row = fullcheck.failing(ctx)
+    if row is None:
+        return []
+    lines = fullcheck.describe(ctx, row, found=ago(row["ended"] or row["started"], now))
+    return [f"  - {lines[0]}", *(f"      {line}" for line in lines[1:])]
+
+
+def _full_check_lines(ctx, now: float) -> list[str]:
+    from agent_praxis import fullcheck
+
+    cmd = fullcheck.command(ctx.cfg)
+    if not cmd:
+        return []
+    every, store = ctx.cfg.full_check_every, ctx.store
+    often = f"after every {every} landing(s)" if every else "only when you ask"
+    out = [f"FULL CHECK ({often}; `praxis fullcheck` runs it now): {cmd}"]
+    going, last = fullcheck.in_progress(store), fullcheck.newest(store, cmd)
+    judged = fullcheck.newest(store, cmd, fullcheck.JUDGED)
+    since = fullcheck.landings_since(store, cmd)
+    if going is not None:
+        out.append(f"  - running now on commit {fullcheck.short(going['commit_id'])} (started "
+                   f"{ago(going['started'], now)}: {going['why']}). Its output is in {store.dir / 'logs'}")
+    elif last is not None and last["result"] in (None, "interrupted"):
+        out.append("  - the last run was interrupted (its process ended before it finished). The next landing starts "
+                   "it again, or run: praxis fullcheck")
+    if judged is None:
+        out.append("  - it has not finished on this project yet")
+    elif judged["result"] == "passed":
+        out.append(f"  - last passed {ago(judged['ended'] or judged['started'], now)} on commit "
+                   f"{fullcheck.short(judged['commit_id'])} ({judged['why']}); {since} landing(s) since")
+    else:
+        out.append(f"  - FAILING since {ago(judged['ended'] or judged['started'], now)} on commit "
+                   f"{fullcheck.short(judged['commit_id'])} (see NEEDS YOU above); {since} landing(s) since")
+    return [*out, ""]
 
 
 def _heavy_lines(ctx, now: float) -> list[str]:

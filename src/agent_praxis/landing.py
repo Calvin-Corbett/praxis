@@ -274,12 +274,22 @@ def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> 
         ctx.say(f"Landed: {row['name']}'s work on \"{row['task']}\" is now in {main} ({summary}).")
         generated.rebuild_after_landing(ctx, row, base, tip)  # still this agent's turn: nobody else moves main
         hooks.run_after_land(ctx, row, gitops.rev(root, main_ref) or tip)
+        _full_check_after(ctx, command, tip)
         if not finish:
             ctx.say(f"When the task is finished: praxis done {row['name']}")
         return True
     return _fail(ctx, row, "busy-main", "the main version kept changing during the check",
                  f"The main version changed {RETRIES_WHEN_MAIN_MOVES} times while Praxis was checking. "
                  "Someone is committing to it directly, outside Praxis. Land again when that stops.")
+
+
+def _full_check_after(ctx: Ctx, used: str, tip: str) -> None:
+    """The safety net behind quick checks: after a landing, start praxis.toml's full_check in the background when
+    it is due (see fullcheck). *used* is the check command this landing ran, *tip* the commit it landed."""
+    if ctx.cfg.full_check.strip():
+        from agent_praxis import fullcheck
+
+        fullcheck.after_landing(ctx, used, tip)
 
 
 def _needs_the_human(ctx: Ctx, row, output: str, log: str) -> bool:

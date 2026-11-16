@@ -66,13 +66,14 @@ def start(ctx: Ctx, name: str, finish: bool = False) -> int:
     return 0
 
 
-def _spawn(args: list[str], out) -> tuple[subprocess.Popen, bool]:
-    """Start *args* with no keyboard, no window, and nothing tying it to this process. (process, fully independent)"""
+def _spawn(args: list[str], out, cwd: Path | str | None = None) -> tuple[subprocess.Popen, bool]:
+    """Start *args* with no keyboard, no window, and nothing tying it to this process. (process, fully independent)
+    It starts in *cwd*, or in the folder this process is in."""
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     here = str(Path(__file__).resolve().parents[1])  # the same Praxis as this one, wherever it was installed
     env["PYTHONPATH"] = here + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    kw = {"cwd": os.getcwd(), "env": env, "stdin": subprocess.DEVNULL, "stdout": out, "stderr": subprocess.STDOUT}
+    kw = {"cwd": str(cwd) if cwd else os.getcwd(), "env": env, "stdin": subprocess.DEVNULL, "stdout": out, "stderr": subprocess.STDOUT}
     if os.name != "nt":
         return subprocess.Popen(args, start_new_session=True, **kw), True
     flags = _NEW_PROCESS_GROUP | _NO_WINDOW

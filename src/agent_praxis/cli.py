@@ -23,6 +23,8 @@ Everyday commands:
   praxis land <agent> --background              the same, carrying on after this command returns
   praxis wait <agent>                           follow a background landing to its end
   praxis run --heavy <command...>               run a heavy job (whole test suite, browser run) when a place is free
+  praxis fullcheck                              run praxis.toml's full_check on the main version now (in a scratch
+                                                folder; landings carry on); --background returns at once
   praxis status                                 see who is doing what, and what needs you
   praxis done <agent>                           finish: release its files and remove its folder
 
@@ -77,6 +79,12 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("run", help="run a heavy job when fewer than heavy_jobs are running")
     s.add_argument("--heavy", action="store_true", required=True, help="queue the command with the project's heavy jobs")
     s.add_argument("job", nargs=argparse.REMAINDER, metavar="command", help="the command to run")
+
+    s = sub.add_parser("fullcheck", help="run praxis.toml's full_check on the main version now")
+    s.add_argument("--background", action="store_true",
+                   help="start it and return at once; `praxis status` shows how it goes")
+    s.add_argument("--in-background", action="store_true", help=argparse.SUPPRESS)  # the background process itself
+    s.add_argument("--why", default="", help=argparse.SUPPRESS)
 
     sub.add_parser("status", help="show who is doing what")
     sub.add_parser("launcher", help="write the launcher at ~/.praxis/bin that always runs the newest Praxis")
@@ -150,6 +158,9 @@ def run(argv: list[str]) -> int:
         elif cmd == "run":
             from agent_praxis import heavy
             return heavy.run(ctx, args.job)
+        elif cmd == "fullcheck":
+            from agent_praxis import fullcheck
+            return fullcheck.command_line(ctx, background=args.background, child=args.in_background, why=args.why)
         elif cmd == "status":
             from agent_praxis import status
             sys.stdout.write(status.render(ctx))

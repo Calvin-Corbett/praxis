@@ -196,6 +196,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis land <agent> --background` | The same, but returns as soon as the landing has its place in line. |
 | `praxis wait <agent>` | Follow a background landing to its end: its output, result and exit code. |
 | `praxis run --heavy <command...>` | Run a heavy job (a whole test suite, a browser run) only when fewer than `heavy_jobs` are running; otherwise wait in line. |
+| `praxis fullcheck` | Run `full_check` (the test of the whole project) on the main version now, in a scratch folder. `--background` returns at once. |
 | `praxis status` | One page: who is doing what, locks, the line, what needs you, recent landings. |
 | `praxis done <agent>` | Finish an agent whose work has landed. |
 | `praxis abandon <agent>` | Stop an agent. Unlanded work is saved on a branch named `praxis-saved/...`. |
@@ -259,6 +260,50 @@ log, no window and the command's own exit code, and without taking a place. Othe
 would each hold a place while waiting for another and never finish. A leftover token (the outer job is gone, or it
 belongs to another project) is ignored and the call waits in line as usual.
 
+### The full check
+
+Quick checks make a landing fast because they do not test everything every time (`checks` picks a check by the
+files that changed, the check cache skips a tree that already passed, a batch is checked once). The full check is
+the safety net behind them: one command that tests the WHOLE project, run on the main version every so often. Set
+it in `praxis.toml`:
+
+```
+full_check = "npm run test:all"
+full_check_every = 5
+```
+
+`praxis fullcheck` runs it now and ends with exit code 0 when it passed and 2 when it did not. With
+`full_check_every = 5` Praxis also starts it by itself, in the background, after every 5 landings that did not run
+that exact command as their own check (`0`, the default: only when you ask). A landing whose own check is the
+same command counts as a pass, so nothing is tested twice.
+
+It never runs in your main folder and never holds up the landing line. Praxis keeps a scratch folder of its own next
+to the agent folders (`<project>-praxis/_fullcheck`), puts the files of the main version there and runs the command
+in it, while agents keep landing. The folder holds only what is committed; the `share` folders are linked into it and
+`setup` runs in it once, as for a new agent folder, and it is kept between runs so your tools' caches are kept too.
+The full check takes a heavy job place like any `praxis run --heavy` job (so it waits its turn when `heavy_jobs` of
+them are already running), opens no window, and writes to `.git/praxis/logs/full-check-*.log`. The command gets
+`PRAXIS_COMMIT`, the commit it is testing. `praxis fullcheck --background` starts it and returns at once;
+`praxis status` shows how it goes.
+
+**When it fails, Praxis finds the landing that broke it.** It takes the landings since the last pass and searches
+them the way `git bisect` searches commits: test the main version as it was after the middle landing, keep the half
+that holds the break, and again, each step one more run in the scratch folder (a batch is searched agent by agent).
+`praxis status` then shows under NEEDS YOU whose landing broke it, the commit, the log of the run that fails
+there, and the exact `git revert` command that undoes that landing. **Praxis never undoes a landing by itself.**
+You run that command in the main folder, or have an agent land a fix; then `praxis fullcheck` checks again, and the
+notice goes away when it passes.
+
+Good to know:
+
+- Until the full check has passed once, there is no good version to compare with, so a failure is reported
+  without a culprit. Run `praxis fullcheck` once when you set it up.
+- If the full check's process is cut short (a closed terminal, a crash, a restart), nothing is left half-done: the
+  next landing notices and starts it again, and what its search had already found out is not run again.
+- Exit code 3 from the command means "a tool or service I need is down", as for the normal check: Praxis reports
+  that it could not judge the main version and blames no landing.
+- A full check that sometimes fails by itself will sometimes blame a landing wrongly. Keep it deterministic.
+
 ### Exit codes
 
 The check command tells Praxis what happened by its exit code:
@@ -315,6 +360,11 @@ For a landing Praxis looks at the files the landing changes and runs the `run` c
 entries that must always win first. Patterns are read from the top of the project like the other path settings
 (`*` stays inside one folder, `**` spans folders). Without `checks`, nothing changes. The landing output and
 `praxis status` name the check that was used, for example "check passed (check 1 of `checks` (css/**))".
+
+**`full_check`** and **`full_check_every`** (default `""` and `0`): the command that tests the whole project, and
+after how many landings Praxis runs it on the main version by itself (see "The full check" above). `0` means only
+when you run `praxis fullcheck`. `full_check_every` above 0 with an empty `full_check` is refused, so you never
+believe in a safety net that is not there.
 
 **The check cache.** When the exact files that would land (the git tree of the candidate) already passed the same
 check command, Praxis does not run the check again and says "Skipping the check: same tree already passed at
@@ -401,6 +451,9 @@ several Praxis versions can be installed side by side safely.
   the same way without getting better. Praxis shows why. Look at the agent's work, decide what it should do,
   tell it, then run `praxis resume <name>`. An agent that is making progress (fewer problems each time) is
   never paused, however many tries it takes.
+- **The full check is failing.** The test of the whole project (`full_check`) failed on the main version. Praxis
+  shows whose landing broke it, the commit, the log, and the exact `git revert` command that undoes it. Praxis does
+  not undo it for you: run the command in the main folder, or have an agent land a fix, then run `praxis fullcheck`.
 - **An agent went quiet.** If an agent still holds files but has shown no sign of work for a long time
   (24 hours by default, `stale_after_hours` in praxis.toml), Praxis shows it. If that agent has stopped for
   good, run `praxis release-stale <name>` so others can use its files. Its folder and work are kept.
@@ -540,6 +593,8 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import
   copies of your project). Change this with `worktree_root` in praxis.toml.
 - Each agent works on its own git branch, `praxis/<name>` (`branch_prefix` in praxis.toml changes the start).
+- The full check's scratch folder: `<project>-praxis/_fullcheck`, on no branch. Its runs are recorded in the
+  database (format 5), and their output is in `.git/praxis/logs/full-check-*.log`.
 - The check cache (the newest 200 passes) and the heavy job queue are in the same database; each job's output goes to `.git/praxis/logs/<agent>-heavy-<time>.log`.
 - Background landings write to `.git/praxis/background/<agent>.log`; setup, after_land and check output go to
   `.git/praxis/logs/`.
