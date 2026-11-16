@@ -8,6 +8,7 @@ its file lock, and the next process in line sees that and removes the dead ticke
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
@@ -47,6 +48,59 @@ else:
 
 
 POLL_SECONDS = 0.3
+NOTE_HEARTBEAT_SECONDS = 60  # a waiting batch member says it is still waiting this often
+
+
+def note_file(store: Store, token: str) -> Path:
+    """The small file where the agent at the head of the line tells the agent holding *token* that they land together
+    (and, at the end, how it went). Only the head writes it; only its owner and Praxis's recovery read it."""
+    return store.dir / "queue" / f"{token}.note"
+
+
+def read_note(store: Store, token: str) -> dict | None:
+    try:
+        data = json.loads(note_file(store, token).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_note(store: Store, token: str, data: dict) -> None:
+    """Replace the note in one step, so a reader never sees half of it."""
+    path = note_file(store, token)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(f".tmp{os.getpid()}")
+    temp.write_text(json.dumps(data), encoding="utf-8")
+    for attempt in range(50):  # a reader may have the old file open for an instant (Windows refuses the swap then)
+        try:
+            os.replace(temp, path)
+            return
+        except OSError:
+            if attempt == 49:
+                raise
+            time.sleep(0.05)
+
+
+def clear_note(store: Store, token: str) -> None:
+    try:
+        note_file(store, token).unlink()
+    except OSError:
+        pass
+
+
+def batch_of(store: Store, agent: str) -> list[str]:
+    """The agents landing together with *agent* right now (including itself), or [] when it is not in a batch."""
+    try:  # the head of a batch keeps a marker file
+        marker = json.loads((store.dir / "batches" / f"{agent}.json").read_text(encoding="utf-8"))
+        if ticket_alive(store, marker["token"]):
+            return [m["agent"] for m in marker["members"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    for row in store.rows("SELECT token FROM queue WHERE agent = ? ORDER BY id", (agent,)):
+        note = read_note(store, row["token"])
+        if note and not note.get("done") and note.get("members") and ticket_alive(store, row["token"]):
+            return list(note["members"])
+    return []
 
 
 def ticket_alive(store: Store, token: str) -> bool:
@@ -83,6 +137,7 @@ class Ticket:
         self.token = uuid.uuid4().hex
         self.handle = None
         self.id: int | None = None
+        self.verdict: dict | None = None  # set when the agent ahead landed (or refused) this agent's work for it
 
     def _file(self, token: str) -> Path:
         return self.dir / f"{token}.lock"
@@ -107,8 +162,21 @@ class Ticket:
         return ticket_alive(self.store, token)
 
     def _wait(self) -> None:
-        told = None
+        told = told_batch = None
+        last_batch_word = time.monotonic()
         while True:
+            note = read_note(self.store, self.token)
+            if note and note.get("done"):  # the agent at the head of the line took this one into its batch and is done
+                self.verdict = note
+                return
+            if note and note.get("members") and told_batch != note["members"]:
+                told_batch = note["members"]
+                last_batch_word = time.monotonic()
+                self.say("Your work was taken into a batch: " + ", ".join(told_batch) + " are checked together, once, "
+                         "and each lands in line order. Praxis tells you how it went for you.")
+            elif note and note.get("members") and time.monotonic() - last_batch_word >= NOTE_HEARTBEAT_SECONDS:
+                last_batch_word = time.monotonic()
+                self.say("Still waiting for the batch's check (" + ", ".join(note["members"]) + ").")
             ahead = []
             for row in self.store.rows("SELECT * FROM queue WHERE id < ? ORDER BY id", (self.id,)):
                 if self._alive(row["token"]):
@@ -120,6 +188,7 @@ class Ticket:
                     self._file(row["token"]).unlink()
                 except OSError:
                     pass
+                clear_note(self.store, row["token"])
             if not ahead:
                 with self.store.write() as db:
                     db.execute("UPDATE queue SET started = ? WHERE id = ?", (time.time(), self.id))
@@ -143,3 +212,4 @@ class Ticket:
                 self._file(self.token).unlink()
             except OSError:
                 pass
+            clear_note(self.store, self.token)

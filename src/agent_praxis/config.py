@@ -51,6 +51,7 @@ class Config:
     exclusive_code: bool = False
     heavy_jobs: int | str = 2  # a number, or "auto": sized from the machine's load each time a job asks
     heavy_max: int = 0  # the most places "auto" may use; 0 means half the CPU cores, at least 2
+    batch_max: int = 4
     generated: list[dict] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)
 
@@ -156,6 +157,11 @@ heavy_jobs = {_q(cfg.heavy_jobs) if isinstance(cfg.heavy_jobs, str) else cfg.hea
 # ** spans folders), for example
 # checks = [{{ paths = ["js/thermo.js", "css/**"], run = "npm run test:ui" }}]
 checks = [{_checks(cfg.checks)}]
+
+# When several agents wait in the landing line, the one at the front lands up to this many of them together: one
+# check for the whole batch, and if it fails Praxis halves the batch to find the one that broke it. 1 turns
+# batching off (one landing at a time).
+batch_max = {cfg.batch_max}
 
 # Files a command makes from other files. Nobody claims or edits them: after each landing that changes one
 # of the `from` files, Praxis runs the command in the main folder and commits the new file, for example
@@ -347,6 +353,8 @@ def load(root: Path) -> Config:
         raise PraxisError('praxis.toml: heavy_jobs must be 1 or more (or "auto").')
     if cfg.heavy_max < 0:
         raise PraxisError("praxis.toml: heavy_max must be 1 or more (or leave it out).")
+    if cfg.batch_max < 1:
+        raise PraxisError("praxis.toml: batch_max must be 1 or more (1 turns batching off).")
     if cfg.land_method not in ("rebase", "merge"):
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
     _check_branch_prefix(cfg.branch_prefix)
@@ -464,8 +472,8 @@ def _clean(path: str) -> str:
 _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": list, "worktree_root": str,
           "land_method": str, "enough_after": int, "stale_after_hours": float, "branch_prefix": str,
           "setup": str, "share": list, "after_land": str, "after_done": str, "commit_trailers": list,
-          "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "generated": "tables",
-          "checks": "tables"}
+          "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
+          "generated": "tables", "checks": "tables"}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',

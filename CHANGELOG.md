@@ -16,6 +16,16 @@
   places while the CPU and memory are idle, fewer when it is busy, aiming for about 75 percent CPU, never below 1 and
   never above the new `heavy_max` (default: half the CPU cores, at least 2). A number still works as before.
   `praxis status` shows the current limit and why.
+- **Waiting agents land together.** When two or more agents are waiting in the landing line, the agent at the front
+  takes the others that are ready, puts their saved work on top of the newest version in line order and runs your
+  check once for all of them, so nine agents waiting on a 30 minute check no longer wait about 5 hours. If the check
+  passes, they all land, one commit each in order and each still marked by agent. If it fails, Praxis halves the
+  batch and rechecks each half to find the work that broke it: the halves that pass land, the culprit is refused with
+  the check's output, and the others carry on. Each `praxis land` still prints its own result and exits with its own
+  code, and a refusal for a clash or for undoing another agent's work still names whose. With one agent waiting,
+  nothing changes. If the front agent is stopped, nobody's work is lost and the next landing records what landed and
+  puts its folder back. `praxis status` shows who is in a batch. The new `batch_max` setting in `praxis.toml`
+  (default `4`) caps the batch; `1` turns batching off.
 - **A heavy job can start another heavy job without freezing.** If the command you run with `praxis run --heavy`
   itself calls `praxis run --heavy`, the inner call used to hold a place while waiting for another, so two such jobs
   at the limit waited for each other forever. Now every heavy job's environment carries `PRAXIS_HEAVY_TOKEN`, and an

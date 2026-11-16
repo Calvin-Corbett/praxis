@@ -211,6 +211,24 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 File names can be written with `/` or `\`, and upper/lower case does not matter. They are read from the
 folder you are in, the way a terminal reads them (so from `scripts/`, `player.gd` means `scripts/player.gd`).
 
+### Batched landings
+
+When two or more agents are waiting in the landing line, the agent at the front takes the others that are ready
+and lands them together, so nine waiting agents do not wait nine checks one after another. Praxis puts each
+agent's saved work on top of the newest version in line order, runs your check **once** for all of them, and if
+it passes lands them all: each agent's commits stay its own, in line order, still marked by agent. Every waiting
+`praxis land` still prints only its own result and exits with its own code (0, 1, 2 or 3 as above), and "taken
+into a batch" shows in its output while it waits.
+
+If the check fails, Praxis cuts the batch in half and checks each half on top of the newest version, again and
+again, until it finds the work that broke it. The halves that pass land; the work that failed is refused with the
+check's own output, and the others carry on. Nothing lands that was not checked as exactly what lands. An agent
+whose work cannot join a batch (its changes clash with another agent's in the same batch) is left out and lands on
+its own turn, so a refusal for a clash or for undoing another agent's work still names whose landing it is. With one
+agent waiting, landing works exactly as it did before. If the agent at the front is stopped part-way, every agent's
+work is still saved: the next landing records whatever did land, puts the stopped agent's folder back on its own
+branch, and the line carries on. `praxis status` shows who is in a batch. Turn it off, or cap it, with `batch_max`.
+
 ### Landing in the background
 
 Many AI tools end a command after about 10 minutes, and a full check can take longer. Run
@@ -276,6 +294,10 @@ the command in the main folder (with `env`, no keyboard, no window, no time limi
 turn in the line, and if the file changed commits it onto main as "Rebuild js/thermodata.js (after claude-1's
 landing)". If the command fails, the landing stays: `praxis status` shows the file as out of date with the log,
 and the next landing tries again. Praxis never overwrites unsaved changes to the file in the main folder.
+
+**`batch_max`** (default `4`): the most agents the agent at the front of the landing line lands together, with one
+check (see "Batched landings" above). `1` turns batching off: one landing at a time, as before. Batching is for
+`land_method = "rebase"`; with `"merge"` every landing is on its own. Must be 1 or more.
 
 **`heavy_jobs`** (default `2`): how many `praxis run --heavy` jobs may run at once on this project (see
 "Heavy jobs" above). The rest wait in line. A whole number, 1 or more, or `"auto"`: Praxis then works the limit out
@@ -471,7 +493,8 @@ folder with `.git`). If it does not (say, a home folder kept in git), give the g
 `praxis-saved/...` branch, and the message says how to carry on from it.
 
 **Waiting in line takes a long time**
-That is normal: one landing at a time, and each runs the full check. Praxis never gives up waiting. If a
+That is normal: landings go through the line, and each batch of waiting agents runs the full check once (see
+"Batched landings" above; `batch_max = 1` makes it one landing, and one check, at a time). Praxis never gives up waiting. If a
 landing process was closed or crashed, the next one in line notices and carries on (`praxis status` shows a
 stopped landing as stopped). On Windows, a check whose landing was stopped is stopped with it. Problems in the
 main folder never count against an agent's tries, so they never get an agent paused.

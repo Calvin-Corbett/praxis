@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agent_praxis import generated, identity, paths
 from agent_praxis.agents import Ctx, agent_here, folder_state, look_at_agents, stale_agents
-from agent_praxis.landing_queue import ticket_alive
+from agent_praxis.landing_queue import batch_of, ticket_alive
 
 
 def ago(stamp: float, now: float | None = None) -> str:
@@ -72,6 +72,10 @@ def render(ctx: Ctx) -> str:
     line = store.rows("SELECT * FROM queue ORDER BY id")
     alive = {q["id"]: ticket_alive(store, q["token"]) for q in line}
     places = _places(line, alive)
+    together = {a: batch_of(store, a) for a in places}  # agents landing in a batch: checked once, together
+    for a, names in together.items():
+        if len(names) > 1:
+            places[a] += f"; in a batch with {', '.join(n for n in names if n != a)} (checked together)"
     out.append(f"WORKING NOW ({len(agents)} agent{'s' if len(agents) != 1 else ''})" if agents else "WORKING NOW: nobody")
     for a in agents:
         mine = [c for c in claims if c["agent"] == a["name"]]
@@ -151,6 +155,8 @@ def render(ctx: Ctx) -> str:
             out.append(f"  {n}. {q['agent']} is landing now (started {ago(q['started'], now)})")
         else:
             out.append(f"  {n}. {q['agent']} is waiting (joined {ago(q['enqueued'], now)})")
+        if len(together.get(q["agent"], [])) > 1 and alive[q["id"]]:
+            out[-1] += f" - in a batch with {', '.join(t for t in together[q['agent']] if t != q['agent'])}"
     out.append("")
 
     recent = store.landings(limit=8)

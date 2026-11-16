@@ -23,7 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import checkcache, enough, generated, gitops, hooks, paths
+from agent_praxis import checkcache, enough, generated, gitops, hooks, landing_batch, paths
 from agent_praxis.agents import (
     JOINING_PREFIX,
     PARALLEL_CHECKOUT,
@@ -40,7 +40,7 @@ from agent_praxis.agents import (
     refuse_other_agents_folder,
 )
 from agent_praxis.errors import PraxisError
-from agent_praxis.landing_queue import Ticket, landing_now
+from agent_praxis.landing_queue import Ticket, landing_now, read_note
 
 TAIL_LINES = 40
 TAIL_BYTES = 256 * 1024  # how much of the end of a check's output is read back (the rest stays in the log)
@@ -74,6 +74,7 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
             f"{name}'s folder has a half-finished git rebase or merge. Finish it (fix the files, then "
             "`git rebase --continue`), or cancel it (`git rebase --abort`), then land again."
         )
+    landing_batch.restore_folder(ctx, row, folder)  # a batch this agent headed was stopped: put its folder back
     problem = off_branch(row, folder, ctx.say)
     if problem:
         raise PraxisError(f"{problem}\nNothing was landed.")
@@ -98,17 +99,31 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
             _finish(ctx, row)
         return True
     progress: dict = {}
-    with Ticket(ctx.store, name, ctx.say):
-        ctx.say(f"It is {name}'s turn to land.")
-        try:
-            ok = _turn(ctx, row, folder, progress, finish)
-        except BaseException:  # stopped half-way (Ctrl+C, a crash): undo the half-done rebase, keep the work
-            _back_on_branch(row, folder)
-            _record_if_it_landed(ctx, row, progress)
-            raise
+    with Ticket(ctx.store, name, ctx.say) as ticket:
+        landing_batch.recover(ctx)  # a stopped batch: what it landed is recorded, and its waiting agents are told
+        ticket.verdict = ticket.verdict or _done_note(ctx, ticket)
+        if ticket.verdict is not None:  # the agent ahead landed (or refused) this agent's work in its batch
+            ok = landing_batch.apply_verdict(ctx, row, folder, ticket.verdict, finish)
+        else:
+            ctx.say(f"It is {name}'s turn to land.")
+            try:
+                ok = landing_batch.try_batch(ctx, row, folder, ticket, finish)  # None: no batch, the usual turn
+                if ok is None:
+                    ok = _turn(ctx, row, folder, progress, finish)
+                elif ok and not finish:
+                    ctx.say(f"When the task is finished: praxis done {name}")
+            except BaseException:  # stopped half-way (Ctrl+C, a crash): undo the half-done rebase, keep the work
+                _back_on_branch(row, folder)
+                _record_if_it_landed(ctx, row, progress)
+                raise
     if ok and finish:
         _finish(ctx, row)
     return ok
+
+
+def _done_note(ctx: Ctx, ticket) -> dict | None:
+    note = read_note(ctx.store, ticket.token)
+    return note if note and note.get("done") else None
 
 
 def _finish(ctx: Ctx, row) -> None:
@@ -280,7 +295,7 @@ def _needs_the_human(ctx: Ctx, row, output: str, log: str) -> bool:
 UNDO_LOOKBACK = 30  # how many of a file's older versions in main are compared with what would land
 
 
-def _undoes_landed_work(ctx: Ctx, row, folder: Path, base: str, changed: list[str]) -> list[str]:
+def _undoes_landed_work(ctx: Ctx, row, folder: Path, base: str, changed: list[str], ref: str = "HEAD") -> list[str]:
     """Shared code files this landing would put back exactly to an older main version, throwing away what other
     landings changed in them since (an agent that rewrote a file from an old copy). One line per file."""
     landed = ctx.store.rows("SELECT agent, commit_id FROM landings WHERE ok = 1 AND commit_id IS NOT NULL "
@@ -289,7 +304,7 @@ def _undoes_landed_work(ctx: Ctx, row, folder: Path, base: str, changed: list[st
     for path in changed[:200]:
         if paths.is_asset(path, ctx.cfg.assets):
             continue  # asset files are one agent at a time: the claims check covers them
-        new = gitops.git(["rev-parse", "--verify", "--quiet", f"HEAD:{path}"], folder, check=False).stdout.strip()
+        new = gitops.git(["rev-parse", "--verify", "--quiet", f"{ref}:{path}"], folder, check=False).stdout.strip()
         if not new:
             continue  # deleted: not a step back to an older version
         versions = _versions_in_main(folder, base, path)  # [(commit, blob)], newest first

@@ -27,6 +27,7 @@ def test_two_processes_land_one_at_a_time(project, tmp_path):
     text = toml.read_text().splitlines()
     text = [f"check = '\"{sys.executable}\" \"{script}\" \"{log}\"'" if line.startswith("check =") else line
             for line in text]
+    text = ["batch_max = 1" if line.startswith("batch_max =") else line for line in text]  # one at a time is the point
     toml.write_text("\n".join(text) + "\n")
 
     praxis("start", "alice", "jump", "scripts/player.gd")
