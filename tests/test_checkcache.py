@@ -98,7 +98,7 @@ def test_a_format_3_database_is_upgraded_and_gets_the_cache_table(tmp_path):
     db.close()
     store = Store(tmp_path)
     try:
-        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT == 6
+        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT == 7
         assert checkcache.count(store) == 0
     finally:
         store.close()

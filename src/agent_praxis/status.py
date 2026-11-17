@@ -60,7 +60,7 @@ def render(ctx: Ctx) -> str:
     looks = look_at_agents(ctx, agents)  # every agent's folder read once, in a few threads
     paused = [a for a in agents if a["paused"]]
     stale = stale_agents(ctx, now, {n: look.activity for n, look in looks.items() if look.error is None})
-    broken = _full_check_needs_you(ctx, now)
+    broken = _full_check_needs_you(ctx, now) + _audit_needs_you(ctx, now)
     if paused or stale or broken:
         out.append("NEEDS YOU")
         out += broken
@@ -187,7 +187,9 @@ def _checks_lines(ctx) -> list[str]:
     from agent_praxis import checkcache
 
     out = []
-    if ctx.cfg.checks:
+    if any("name" in entry for entry in ctx.cfg.checks):
+        out += _named_checks_lines(ctx)
+    elif ctx.cfg.checks:
         out.append("CHECKS (a landing runs the first of these whose paths match a file it changes; else the default)")
         for n, entry in enumerate(ctx.cfg.checks, 1):
             out.append(f"  {n}. {', '.join(entry['paths'])}: {entry['run']}")
@@ -197,6 +199,42 @@ def _checks_lines(ctx) -> list[str]:
         out.append(f"{'  ' if out else 'CHECK CACHE: '}{kept} passed check(s) remembered: the same tree is not "
                    "checked twice with the same command")
     return [*out, ""] if out else []
+
+
+def _named_checks_lines(ctx) -> list[str]:
+    """The named checks: what chooses each one, what it reads, and how many of its passes are remembered."""
+    from agent_praxis import checks
+
+    known = ctx.store.has("checkpasses")  # False while the database is left at an older Praxis's format (store.py)
+    kept = checks.remembered(ctx.store) if known else {}
+    out = ["CHECKS (a landing runs every one of these whose paths match a file it changes, or that reads one; the "
+           "default too when no paths match)"]
+    for entry in ctx.cfg.checks:
+        name, reads = entry["name"], entry.get("inputs")
+        memory = f"{kept.get(name, 0)} pass(es) remembered"
+        if known and not checks.trusted(ctx.store, name):
+            memory = "NOT remembered: its audit failed (see NEEDS YOU above)"
+        out.append(f"  - {name}: {entry['run']}")
+        out.append(f"      paths: {', '.join(entry['paths'])}; reads: "
+                   f"{', '.join(reads) if reads else 'the whole project'}; {memory}")
+    out.append(f"  default: {ctx.cfg.check or '(none)'}")
+    every = ctx.cfg.audit_every
+    out.append("  audit: " + (f"the first pass taken from memory and then one in {every} is run again to make sure"
+                              if every else "off (audit_every = 0)"))
+    return out
+
+
+def _audit_needs_you(ctx, now: float) -> list[str]:
+    """Named checks whose pass from memory failed when it was run again: the `inputs` list needs a person."""
+    from agent_praxis import checkaudit
+
+    if not ctx.store.has("checktrust"):  # the database was left at an older Praxis's format (store.py)
+        return []
+    out = []
+    for row in checkaudit.broken(ctx.store):
+        lines = checkaudit.describe(row, found=ago(row["broken_at"], now))
+        out += [f"  - {lines[0]}", *(f"      {line}" for line in lines[1:])]
+    return out
 
 
 def _full_check_needs_you(ctx, now: float) -> list[str]:

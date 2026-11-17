@@ -3,10 +3,10 @@
 While the agent at the front of the line (the head) runs its check, the next agent only waits. With `speculate` on,
 the head starts that agent's check early, in a process of its own, on "the newest main version + the head's work +
 the next agent's work", built in a scratch folder (`<agent folders>/_early`, a git worktree on no branch). If the head
-lands, the next agent's turn builds exactly the same files and finds that they already passed: the check cache (same
-tree, same command) is the ONLY hand-off. Nothing is ever landed from the scratch folder, and only a pass is
-remembered. If the head's work does not land, the head stops the early run (the process it started, by its process
-id) and nothing is remembered.
+lands, the next agent's turn builds exactly the same files and finds that they already passed: the remembered pass
+(the check cache: same tree, same command; for a named check, the files it reads: see checks) is the ONLY hand-off.
+Nothing is ever landed from the scratch folder, and only a pass is remembered. If the head's work does not land, the
+head stops the early run (the process it started, by its process id) and nothing is remembered.
 
 It is bounded. One early check at a time; only for the first agent waiting behind the head that is not in the head's
 batch; and only when a heavy job place is free right now (it takes one and never waits for one).
@@ -108,12 +108,12 @@ class Line:
             return
         ctx.say(f"Starting the next agent's check early, beside this one (speculate = true). Its output: {log}")
 
-    def wait_for(self, tree: str, command: str) -> float | None:
+    def wait_for(self, tree: str, command: str, passed=None) -> float | None:
         """On this agent's own turn: when the check of exactly these files was started early and still runs, wait
         for it. Returns when the files passed, or None (then the turn runs the check itself)."""
         if not self.ctx.cfg.speculate:
             return None
-        return wait_for(self.ctx, self.row, tree, command)
+        return wait_for(self.ctx, self.row, tree, command, passed=passed)
 
     def keep(self) -> None:
         """The work the early check was built on has landed: let it finish. Its pass is found in the check cache."""
@@ -142,14 +142,20 @@ class Line:
 # --- the next agent's side -------------------------------------------------------------------------------------------
 
 
-def wait_for(ctx: Ctx, row, tree: str, command: str, poll: float = POLL_SECONDS) -> float | None:
+def wait_for(ctx: Ctx, row, tree: str, command: str, poll: float = POLL_SECONDS, passed=None) -> float | None:
     """On an agent's own turn, when its files have no remembered pass yet: if an early check of exactly these files
     and this command is still running, wait for it rather than running the same check twice. Returns when the files
-    passed (from the check cache), or None: then the agent's turn runs the check itself."""
+    passed (from the check cache), or None: then the agent's turn runs the check itself. *passed* answers that
+    question another way (several named checks: *command* then names them all, see checks.signature)."""
+    if passed is None:
+
+        def passed() -> float | None:
+            return checkcache.passed_at(ctx.store, tree, command)
+
     state = active(ctx.store)
     same = state and state.get("agent") == row["name"] and state.get("tree") == tree and state.get("command") == command
     if not same:
-        return checkcache.passed_at(ctx.store, tree, command)  # it may have ended, and passed, a moment ago
+        return passed()  # it may have ended, and passed, a moment ago
     ctx.say(
         f"{row['name']}'s check was started early, while the landing before it was being checked. Waiting for that "
         "run to end rather than running the same check twice."
@@ -160,10 +166,10 @@ def wait_for(ctx: Ctx, row, tree: str, command: str, poll: float = POLL_SECONDS)
         if time.monotonic() - last >= STILL_WAITING_SECONDS:
             last = time.monotonic()
             ctx.say(f"The early check is still running ({int((last - began) // 60)} min).")
-    passed = checkcache.passed_at(ctx.store, tree, command)
-    if passed is None:
+    found = passed()
+    if found is None:
         ctx.say("The early run did not pass, so the check runs here now and shows its result.")
-    return passed
+    return found
 
 
 # --- the early check itself (a process of its own) -------------------------------------------------------------------
@@ -222,8 +228,7 @@ def run_child(ctx: Ctx, candidate: str, after: int, taken: list[str]) -> int:
 
 
 def _check_early(ctx: Ctx, candidate: str, row, tip: str, fork: str) -> None:
-    from agent_praxis import fullcheck
-    from agent_praxis import landing as L
+    from agent_praxis import checks, fullcheck
 
     store, name = ctx.store, row["name"]
     folder = fullcheck._scratch(ctx, candidate, SCRATCH)
@@ -237,11 +242,12 @@ def _check_early(ctx: Ctx, candidate: str, row, tip: str, fork: str) -> None:
         return
     checked, tree = gitops.rev(folder, "HEAD"), _tree(folder, "HEAD")
     changed = gitops.changed_between(folder, candidate, "HEAD")  # on top of the work that is landing now
-    command = ctx.cfg.check_for(changed)[0].strip()
-    if not command or not tree or checked == candidate:
+    plan = checks.plan(ctx.cfg, changed)  # the checks its own turn will choose
+    command = checks.signature(plan)
+    if not plan or not tree or checked == candidate:
         ctx.say(f"{name} has nothing to check early.")
         return
-    if checkcache.passed_at(store, tree, command) is not None:
+    if checks.look(ctx, folder, checked, plan).ok:
         ctx.say(f"{name}'s files on top of the work that is landing now already passed this command.")
         return
     with heavy.place(ctx, f"{name} (early check)", command, wait=False) as (mine, token):
@@ -251,19 +257,21 @@ def _check_early(ctx: Ctx, candidate: str, row, tip: str, fork: str) -> None:
         state = {"agent": name, "tree": tree, "command": command, "candidate": candidate}
         _write_state(store, {**state, "started": time.time(), "pid": os.getpid()})
         ctx.say(
-            f"Running {name}'s check early, on top of the work that is landing now (commit {candidate[:10]}): {command}"
+            f"Running {name}'s check early, on top of the work that is landing now (commit {candidate[:10]}): "
+            f"{checks.describe(plan)}"
         )
         cfg = dataclasses.replace(ctx.cfg, env={**ctx.cfg.env, heavy.TOKEN_ENV: token})
         inner = dataclasses.replace(ctx, cfg=cfg)
-        code, _output, log = L._run_check(inner, row, folder, command, candidate, changed)
-        L._put_back_check_rewrites(inner, row, folder)
-        if code != 0:
+        # The only hand-off: a pass is remembered (same tree and command; a named check: the files it reads).
+        outcome = checks.run(inner, row, folder, checked, plan, base=candidate, changed=changed)
+        bad, log = outcome.failed, outcome.log
+        if bad is not None:
             ctx.say(
-                f"It did not pass (exit code {code}). Nothing is remembered: {name}'s own turn runs the check. Output: {log}"
+                f"It did not pass (exit code {bad.code}). Nothing is remembered: {name}'s own turn runs the check. "
+                f"Output: {log}"
             )
             return
-        if L._changed_during_check(inner, row, folder, checked):
+        if outcome.moved:
             ctx.say("Files changed in the scratch folder while the check ran, so the pass is not remembered.")
             return
-        checkcache.record(store, tree, command)  # the only hand-off: the same tree and command count as passed
         ctx.say(f"It passed. When {name}'s turn builds the same files, the check is not run again. Output: {log}")

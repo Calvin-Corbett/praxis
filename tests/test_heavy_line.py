@@ -486,7 +486,7 @@ def test_a_format_5_database_is_upgraded_and_its_jobs_are_ordinary_jobs(tmp_path
     db.close()
     store = Store(tmp_path)
     try:
-        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT == 6
+        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT == 7
         assert store.row("SELECT * FROM heavy")["priority"] == 0
         with store.write() as db:  # the step is safe on a database that already has the column
             for statement in store_module._statements(store_module.UPGRADES[6]):

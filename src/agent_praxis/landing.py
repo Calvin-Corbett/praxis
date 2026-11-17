@@ -23,7 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import checkcache, enough, generated, gitops, hooks, landing_batch, paths, shells
+from agent_praxis import checks, enough, generated, gitops, hooks, landing_batch, paths, shells
 from agent_praxis.agents import (
     JOINING_PREFIX,
     PARALLEL_CHECKOUT,
@@ -238,45 +238,31 @@ def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) 
                          "then land again (or ask the human to sort it out). Landing never changes files "
                          "another agent holds.")
         checked = gitops.rev(folder, "HEAD")
-        log = None
-        command, which = ctx.cfg.check_for(landing_changes)
-        command = command.strip()
-        named = f" ({which})" if ctx.cfg.checks else ""  # without `checks` it is just "the check", as before
-        tree = gitops.git(["rev-parse", "HEAD^{tree}"], folder, check=False).stdout.strip()
-        cached = checkcache.passed_at(ctx.store, tree, command) if command and tree else None
-        if cached is None and command and tree:
-            cached = line.wait_for(tree, command)  # its check may have been started early, and still be running
-        if cached is not None:
-            ctx.say(f"Skipping the check{named}: same tree already passed at "
-                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cached))} with the same command: {command}")
-        elif command:
-            line.start(checked, [row["name"]])  # with `speculate`: the next agent's check starts beside this one
-            ctx.say(f"Running the check{named}: {command}")
-            code, output, log = _run_check(ctx, row, folder, command, base, landing_changes)
-            _put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
-            if code == NEEDS_THE_HUMAN:
-                return _needs_the_human(ctx, row, output, log)
-            if code != 0:
-                count = enough.problem_count(output)
-                tail = "\n".join(output.rstrip().splitlines()[-TAIL_LINES:])
-                return _fail(ctx, row, "check", "the check failed" + (f" ({count} problem(s))" if count else ""),
-                             f"The check failed, so nothing landed. The end of its output:\n{tail}\n"
-                             f"Full output: {log}\nFix the problem in your folder, then land again.",
-                             problems=count, log=log, sig_text=output)
-            moved = _changed_during_check(ctx, row, folder, checked)
-            if moved:
-                return _fail(ctx, row, "changed-during-check", "files changed while the check ran", moved)
-            if tree:
-                checkcache.record(ctx.store, tree, command)  # only a pass is remembered, never a failure
+        # The checks this landing must pass (see checks): one remembered as passed is skipped, the others run here.
+        # wait_for: a check of these very files may have been started early, and still be running. before_run:
+        # with `speculate`, the next agent's check starts beside this one.
+        plan = checks.plan(ctx.cfg, landing_changes)
+        outcome = checks.run(ctx, row, folder, checked, plan, base=base, changed=landing_changes,
+                             wait_for=line.wait_for, before_run=lambda: line.start(checked, [row["name"]]))
+        bad, log = outcome.failed, outcome.log
+        if bad is not None and bad.code == NEEDS_THE_HUMAN:
+            return _needs_the_human(ctx, row, bad.output, bad.log)
+        if bad is not None:
+            count = enough.problem_count(bad.output)
+            tail = "\n".join(bad.output.rstrip().splitlines()[-TAIL_LINES:])
+            short, sentence = bad.failure()
+            return _fail(ctx, row, "check", short + (f" ({count} problem(s))" if count else ""),
+                         f"{sentence}, so nothing landed. The end of its output:\n{tail}\n"
+                         f"Full output: {log}\nFix the problem in your folder, then land again.",
+                         problems=count, log=log, sig_text=bad.output)
+        if outcome.moved:
+            return _fail(ctx, row, "changed-during-check", "files changed while the check ran", outcome.moved)
         if gitops.rev(root, main_ref) != base:
             ctx.say("The main version changed while the check ran. Doing it again on top of the newest version.")
             continue
-        summary = "no check is set, so nothing was tested"
-        if command:
-            summary = ("check passed" + (", same tree already passed" if cached is not None else "")
-                       + (f" ({which})" if named else ""))
+        summary = outcome.summary()
         progress.update(checked=checked, summary=summary, log=log)
-        advanced = _advance(ctx, row, base, checked, bool(command))
+        advanced = _advance(ctx, row, base, checked, bool(plan))
         if advanced == MAIN_MOVED:
             progress.clear()
             ctx.say("The main version changed just as Praxis was moving it forward. Doing it again on top of the "
@@ -293,7 +279,8 @@ def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) 
         if gitops.rev(root, main_ref) == tip:
             line.keep()  # main is exactly what the early check was built on: let it finish
         hooks.run_after_land(ctx, row, gitops.rev(root, main_ref) or tip)
-        _full_check_after(ctx, command, tip)
+        _full_check_after(ctx, outcome.used(ctx.cfg), tip)
+        _audit_after(ctx, row["name"], base, tip, outcome)
         if not finish:
             ctx.say(f"When the task is finished: praxis done {row['name']}")
         return True
@@ -309,6 +296,16 @@ def _full_check_after(ctx: Ctx, used: str, tip: str) -> None:
         from agent_praxis import fullcheck
 
         fullcheck.after_landing(ctx, used, tip)
+
+
+def _audit_after(ctx: Ctx, who: str, base: str, tip: str, outcome) -> None:
+    """The net behind `inputs`: after a landing that took a named check's pass from memory, run that check again
+    in the background when its turn has come (see checkaudit). *who* landed; the landing moved main from *base*
+    to *tip*."""
+    if outcome is not None and outcome.from_memory():
+        from agent_praxis import checkaudit
+
+        checkaudit.after_landing(ctx, who, base, tip, outcome.from_memory())
 
 
 def _needs_the_human(ctx: Ctx, row, output: str, log: str) -> bool:
@@ -636,10 +633,20 @@ def _decode(data: bytes) -> str:
     return data.decode(locale.getpreferredencoding(False) or "utf-8", errors="replace")
 
 
+def _made(log: Path) -> bool:
+    """Make the empty file *log*, in one step. False when it is there already: two checks of one landing that start
+    in the same second then get a log each."""
+    try:
+        open(log, "xb").close()
+    except FileExistsError:
+        return False
+    return True
+
+
 def _new_log(logs: Path, agent: str) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     log, n = logs / f"{agent}-{stamp}.log", 2
-    while log.exists():
+    while not _made(log):
         log, n = logs / f"{agent}-{stamp}-{n}.log", n + 1
     return log
 

@@ -60,6 +60,8 @@ class Config:
     full_check: str = ""  # the command that proves the WHOLE project works: the safety net behind `checks`
     full_check_every: int = 0  # run it after this many landings that did not run it themselves; 0: only on demand
     speculate: bool = False  # start the next waiting agent's check early, while the head's check runs
+    audit_every: int = 20  # about one in this many passes used from memory is run again anyway; 0: never
+    checks_together: bool = True  # several named checks of one landing run at once when heavy job places are free
 
     def check_for(self, changed: list[str]) -> tuple[str, str]:
         """(the check command, its name) for a landing that changes the files *changed*: the command of the FIRST
@@ -168,7 +170,25 @@ heavy_waiting_per_agent = {cfg.heavy_waiting_per_agent}
 # put the strictest entries first. Paths are read from the top of the project (* stays inside one folder,
 # ** spans folders), for example
 # checks = [{{ paths = ["js/thermo.js", "css/**"], run = "npm run test:ui" }}]
+#
+# Named checks. Give EVERY entry a `name` and the rule changes: every entry whose `paths` match a changed file
+# runs (not only the first), and `check` above runs as well when no entry's `paths` match. A named entry may list
+# `inputs`, the files its command reads (the same kind of patterns), and `env_inputs`, the environment variables
+# it reads. Praxis then remembers a pass for exactly those files: while they, the command and those variables
+# stay the same, that check is not run again, whatever else changes in the project. A named entry also runs when
+# a landing changes one of its `inputs`. Without `inputs` an entry reads the whole project. For example
+# checks = [{{ name = "ui", paths = ["css/**"], inputs = ["css/**", "js/ui/**"], run = "npm run test:ui" }}]
 checks = [{_checks(cfg.checks)}]
+
+# The audit behind `inputs`. About one in this many passes used from memory is run again anyway, in a scratch
+# folder, after the landing that used it (never holding it up). If it fails there, the `inputs` list is probably
+# missing files: `praxis status` says so under NEEDS YOU, and that check runs every time until you run
+# `praxis trust <name>`. 0 turns the audit off.
+audit_every = {cfg.audit_every}
+
+# When a landing has several named checks to run, they run at the same time (in the same folder) while heavy job
+# places (heavy_jobs above) are free: each one beyond the first takes a place. false: always one after another.
+checks_together = {"true" if cfg.checks_together else "false"}
 
 # When several agents wait in the landing line, the one at the front lands up to this many of them together: one
 # check for the whole batch, and if it fails Praxis halves the batch to find the one that broke it. 1 turns
@@ -248,8 +268,16 @@ def _heavy_bounds(cfg: Config) -> str:
 
 
 def _checks(items: list[dict]) -> str:
-    return ", ".join("{ paths = [" + ", ".join(_q(p) for p in c["paths"]) + "], run = " + _q(c["run"]) + " }"
-                     for c in items)
+    def strings(values: list[str]) -> str:
+        return "[" + ", ".join(_q(v) for v in values) + "]"
+
+    def one(c: dict) -> str:
+        parts = [f"name = {_q(c['name'])}"] if "name" in c else []
+        parts.append(f"paths = {strings(c['paths'])}")
+        parts += [f"{key} = {strings(c[key])}" for key in ("inputs", "env_inputs") if key in c]
+        return "{ " + ", ".join([*parts, f"run = {_q(c['run'])}"]) + " }"
+
+    return ", ".join(one(c) for c in items)
 
 
 def _generated(items: list[dict]) -> str:
@@ -397,6 +425,8 @@ def load(root: Path) -> Config:
         raise PraxisError("praxis.toml: batch_max must be 1 or more (1 turns batching off).")
     if cfg.full_check_every < 0:
         raise PraxisError("praxis.toml: full_check_every must be 0 (only when you ask) or more.")
+    if cfg.audit_every < 0:
+        raise PraxisError("praxis.toml: audit_every must be 0 (never audit a pass used from memory) or more.")
     if cfg.full_check_every and not cfg.full_check.strip():
         raise PraxisError(
             f"praxis.toml: full_check_every is {cfg.full_check_every}, but full_check is empty, so there is no "
@@ -488,16 +518,19 @@ def _check_generated(items: list) -> list[dict]:
 
 
 def _check_checks(items: list) -> list[dict]:
-    """Each checks entry must be { paths = ["...", ...], run = "..." }. Patterns are kept with forward slashes."""
+    """Each checks entry must be { paths = ["...", ...], run = "..." }, and may have name, inputs and env_inputs
+    (see checks.py). Patterns are kept with forward slashes. An entry keeps only the settings it was given."""
     example = 'for example checks = [{ paths = ["js/thermo.js", "css/**"], run = "npm run test:ui" }]'
-    out = []
+    named = ('for example checks = [{ name = "ui", paths = ["css/**"], inputs = ["css/**", "js/ui/**"], '
+             'run = "npm run test:ui" }]')
+    out, seen = [], set()
     for n, item in enumerate(items, 1):
         if not isinstance(item, dict):
             raise PraxisError(f"praxis.toml: checks entry {n} must be a table in braces, {example}.")
-        extra = sorted(set(item) - {"paths", "run"})
+        extra = sorted(set(item) - {"paths", "run", "name", "inputs", "env_inputs"})
         if extra:
             raise PraxisError(f"praxis.toml: checks entry {n} has setting(s) Praxis does not know: "
-                              + ", ".join(extra) + f". It reads paths and run, {example}.")
+                              + ", ".join(extra) + f". It reads paths, run, name, inputs and env_inputs, {example}.")
         patterns, run = item.get("paths"), item.get("run")
         if (not isinstance(patterns, list) or not patterns
                 or not all(isinstance(p, str) and _clean(p) for p in patterns)):
@@ -509,8 +542,46 @@ def _check_checks(items: list) -> list[dict]:
             raise PraxisError(f"praxis.toml: the run line of checks entry {n} holds a hidden control character "
                               "(a backslash inside double quotes starts a code in TOML). Use forward slashes, or "
                               "single quotes.")
-        out.append({"paths": [_clean(p) for p in patterns], "run": run.strip()})
+        entry = {"paths": [_clean(p) for p in patterns], "run": run.strip()}
+        if "name" in item:
+            name = item["name"]
+            if not isinstance(name, str) or not _CHECK_NAME.fullmatch(name):
+                raise PraxisError(f"praxis.toml: the name of checks entry {n} must be a short word (letters, "
+                                  f"numbers, '-', '_' or '.', starting with a letter or number), {named}.")
+            if name.casefold() in seen:
+                raise PraxisError(f"praxis.toml: two checks entries are named {name}. Each name is used once.")
+            seen.add(name.casefold())
+            entry["name"] = name
+        for key, what in (("inputs", "the files or patterns its command reads"),
+                          ("env_inputs", "the names of the environment variables its command reads")):
+            if key not in item:
+                continue
+            values = item[key]
+            clean = _clean if key == "inputs" else _env_name
+            if not isinstance(values, list) or not values or not all(isinstance(v, str) and clean(v) for v in values):
+                raise PraxisError(f"praxis.toml: {key} of checks entry {n} must be a list of {what}, {named}.")
+            if "name" not in item:
+                raise PraxisError(f"praxis.toml: checks entry {n} has {key} but no name. Praxis remembers a pass "
+                                  f"by the check's name: give the entry one, {named}.")
+            entry[key] = [clean(v) for v in values]
+        out.append(entry)
+    unnamed = [n for n, entry in enumerate(out, 1) if "name" not in entry]
+    if seen and unnamed:
+        raise PraxisError(
+            "praxis.toml: some checks entries have a name and some do not (entry "
+            + ", ".join(str(n) for n in unnamed) + " has none). With names, EVERY entry whose paths match runs; "
+            "without, only the first one does. So give every entry a name, or none."
+        )
     return out
+
+
+_CHECK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")
+
+
+def _env_name(name: str) -> str:
+    """An environment variable's name, or "" when it cannot be one."""
+    name = name.strip()
+    return "" if not name or any(ch in name for ch in "= \t\0") else name
 
 
 def _clean(path: str) -> str:
@@ -528,7 +599,7 @@ _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": 
           "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
           "heavy_min": int, "heavy_waiting_per_agent": int,
           "generated": "tables", "checks": "tables", "full_check": str, "full_check_every": int,
-          "speculate": bool}
+          "speculate": bool, "audit_every": int, "checks_together": bool}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',

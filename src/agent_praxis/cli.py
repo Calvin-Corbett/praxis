@@ -20,6 +20,8 @@ Everyday commands:
   praxis start <agent> "<task>" <files...>      give an agent its own folder and claim its files
   praxis claim <agent> <files...>               say which files you will edit (code files can be shared,
                                                 asset files get locked to one agent)
+  praxis check <agent>                          run the checks of the agent's saved work now, on top of the newest
+                                                main version, without landing: `praxis land` reuses the passes
   praxis land <agent>                           test the agent's work and put it into the main version
   praxis land <agent> --background              the same, carrying on after this command returns
   praxis wait <agent>                           follow a background landing to its end
@@ -36,6 +38,7 @@ When things go wrong:
   praxis release-stale [agent...] [--force]     free the files of agents that went quiet
   praxis unclaim <agent> <files...>             let go of files
   praxis setup <agent>                          run praxis.toml's setup command in the agent's folder again
+  praxis trust <check>                          remember a named check's passes again, after its audit failed
   praxis launcher [--switch]                    register this Praxis with the stable per-user launcher; --switch
                                                 makes the launcher run the newest installed Praxis
 
@@ -99,6 +102,18 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("wait", help="follow an agent's background landing to its end")
     s.add_argument("agent")
+
+    s = sub.add_parser("check", help="run the checks of an agent's saved work now, without landing it")
+    s.add_argument("agent")
+
+    s = sub.add_parser("trust", help="remember a named check's passes again, after its audit failed")
+    s.add_argument("name", metavar="check", help="the check's name in praxis.toml")
+
+    s = sub.add_parser("audit-check")  # no help: the audit's own process, started by a landing (see checkaudit)
+    s.add_argument("--commit", required=True)
+    s.add_argument("--base", required=True)
+    s.add_argument("--who", default="")
+    s.add_argument("--names", default="")
 
     s = sub.add_parser("setup", help="run praxis.toml's setup command in an agent's folder again")
     s.add_argument("agent")
@@ -210,6 +225,16 @@ def run(argv: list[str]) -> int:
         elif cmd == "early-check":
             from agent_praxis import early
             return early.run_child(ctx, args.candidate, args.after, [name for name in args.taken.split(",") if name])
+        elif cmd == "check":
+            from agent_praxis import checknow
+            return checknow.run(ctx, args.agent)
+        elif cmd == "trust":
+            from agent_praxis import checkaudit
+            checkaudit.trust(ctx, args.name)
+        elif cmd == "audit-check":
+            from agent_praxis import checkaudit
+            names = [name for name in args.names.split(",") if name]
+            return checkaudit.run_child(ctx, args.base, args.commit, args.who, names)
         elif cmd == "status":
             from agent_praxis import status
             sys.stdout.write(status.render(ctx))

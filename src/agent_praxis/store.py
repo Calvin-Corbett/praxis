@@ -22,7 +22,7 @@ from agent_praxis.errors import PraxisError
 
 # The database's format number (kept in SQLite's user_version). Raise it whenever the tables change, and add the
 # step that brings an older database up to it to UPGRADES. A database from before format numbers reads as 0.
-FORMAT = 6
+FORMAT = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -132,6 +132,29 @@ CREATE TABLE IF NOT EXISTS fullchecks (
     # A heavy job started from inside a landing's check goes ahead of the waiting jobs that were not (heavy.py).
     6: """
 ALTER TABLE heavy ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+""",
+    # Named checks (checks.py): a pass remembered for the files the check reads, and whether its memory is trusted.
+    7: """
+CREATE TABLE IF NOT EXISTS checkpasses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    key TEXT NOT NULL,
+    passed_at REAL NOT NULL,
+    log TEXT,
+    UNIQUE (name, key)
+);
+CREATE TABLE IF NOT EXISTS checktrust (
+    name TEXT PRIMARY KEY,
+    reuses INTEGER NOT NULL DEFAULT 0,
+    audited INTEGER,
+    audit_at REAL,
+    audit_result TEXT,
+    audit_log TEXT,
+    broken_at REAL,
+    broken_log TEXT,
+    broken_commit TEXT,
+    broken_agent TEXT
+);
 """,
 }
 

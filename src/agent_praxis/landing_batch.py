@@ -330,6 +330,8 @@ class _Run:
         self.root = ctx.repo.root
         self.main_ref = f"refs/heads/{ctx.cfg.main_branch}"
         self.failed: dict[str, tuple[int, str, str]] = {}  # candidate tree -> (check exit code, output, log): it failed
+        self.outcome = None  # how the newest candidate's checks went (see checks), None when it has none
+        self.words: dict[str | None, tuple[str, str]] = {}  # a failed check's log -> how to say which check failed
         self.size = len(marker["members"])
         self.last_landed: str | None = None
         self.used = ""  # the check command the newest candidate was checked with
@@ -408,34 +410,32 @@ class _Run:
     # the check ---------------------------------------------------------------------------------------------------
 
     def _run_check(self, built: list[Member], base: str) -> tuple[int, str, str | None]:
-        from agent_praxis import checkcache
+        """Bring the candidate through its checks (see checks): one remembered as passed is skipped, the others run
+        once for the whole group, and only a pass is remembered. Gives the first failing check's result."""
+        from agent_praxis import checks
         from agent_praxis import landing as L
 
         ctx, folder = self.ctx, self.folder
         self.line.stop()  # a new candidate: an early check built on the last one is of no use
         changed = gitops.changed_between(folder, base, "HEAD")  # what the whole group changes, together
-        command = ctx.cfg.check_for(changed)[0].strip()
-        self.used = command
-        if not command:
+        plan = checks.plan(ctx.cfg, changed)
+        self.used, self.outcome = "", None
+        if not plan:
             return 0, "", None
-        checked = gitops.rev(folder, "HEAD")
-        tree = _tree(folder, "HEAD")
-        if tree and checkcache.passed_at(ctx.store, tree, command) is not None:
-            ctx.say("Skipping the check: the same files already passed the same command.")
-            return 0, "", None
-        self.line.start(checked, [m.name for m in built])  # the next agent's check starts beside this one
-        ctx.say(f"Running the check once for {len(built)} agent(s) ({', '.join(m.name for m in built)}): {command}")
-        code, output, log = L._run_check(ctx, self.head.row, folder, command, base, changed)
-        L._put_back_check_rewrites(ctx, self.head.row, folder)
-        if code == 0:
-            moved = L._changed_during_check(ctx, self.head.row, folder, checked)
-            if moved:
-                L._fail(ctx, self.head.row, "changed-during-check", "files changed while the check ran", moved)
-                self.head.outcome = "refused"
-                raise Abort
-            if tree:
-                checkcache.record(ctx.store, tree, command)  # only a pass is remembered
-        return code, output, log
+        checked, names = gitops.rev(folder, "HEAD"), [m.name for m in built]
+        # before_run: with `speculate`, the next agent's check starts beside this one
+        outcome = checks.run(ctx, self.head.row, folder, checked, plan, base=base, changed=changed, batch=names,
+                             before_run=lambda: self.line.start(checked, names))
+        self.used, self.outcome = outcome.used(ctx.cfg), outcome
+        bad = outcome.failed
+        if bad is not None:
+            self.words[bad.log] = bad.failure()
+            return bad.code, bad.output, bad.log
+        if outcome.moved:
+            L._fail(ctx, self.head.row, "changed-during-check", "files changed while the check ran", outcome.moved)
+            self.head.outcome = "refused"
+            raise Abort
+        return 0, "", outcome.log
 
     # one group: check it, land it or cut it in half ---------------------------------------------------------------
 
@@ -496,6 +496,7 @@ class _Run:
 
         count = enough.problem_count(output)
         tail = "\n".join(output.rstrip().splitlines()[-L.TAIL_LINES :])
+        short, sentence = self.words.get(log, ("the check failed", "The check failed"))
         why = (
             ""
             if alone
@@ -508,8 +509,8 @@ class _Run:
             m.ctx,
             m.row,
             "check",
-            "the check failed" + (f" ({count} problem(s))" if count else ""),
-            f"The check failed, so nothing landed. {why}The end of its output:\n{tail}\nFull output: {log}\n"
+            short + (f" ({count} problem(s))" if count else ""),
+            f"{sentence}, so nothing landed. {why}The end of its output:\n{tail}\nFull output: {log}\n"
             "Fix the problem in your folder, then land again.",
             problems=count,
             log=log,
@@ -528,7 +529,10 @@ class _Run:
         together = "" if len(built) == 1 else f", checked together with {', '.join(m.name for m in built)}"
         summary = (
             "check passed" if ctx.cfg.check.strip() or ctx.cfg.checks else "no check is set, so nothing was tested"
-        ) + (together if len(built) > 1 else "")
+        )
+        if self.outcome is not None and not self.outcome.steps[0].check.alone:
+            summary = self.outcome.summary()  # named checks: which ones passed, and which from memory
+        summary += together if len(built) > 1 else ""
         self.marker["landing"] = {
             "base": base,
             "tip": tip,
@@ -574,6 +578,7 @@ class _Run:
         for m in built:
             hooks.run_after_land(m.ctx, m.row, final)
         L._full_check_after(ctx, self.used, tip)
+        L._audit_after(ctx, ", ".join(m.name for m in built), base, tip, self.outcome)
         for m in built:
             self._decide(m, "landed", ok=True, commit=tip)
         return True

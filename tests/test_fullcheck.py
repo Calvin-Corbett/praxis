@@ -163,7 +163,7 @@ def test_a_format_4_database_is_upgraded_and_gets_the_full_check_table(tmp_path)
     db.close()
     store = Store(tmp_path)
     try:
-        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT == 6
+        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT == 7
         assert store.rows("SELECT * FROM fullchecks") == []
     finally:
         store.close()

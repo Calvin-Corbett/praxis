@@ -63,6 +63,8 @@ only changes the text between the two praxis marker lines.)
    own browser and other agents' programs.
 12. Run whole-suite tests and browser runs through `praxis run --heavy <command>`, so the machine is
    never swamped: it waits in line when too many heavy jobs are running.
+13. When your work is saved (committed), run `praxis check <your-name>` before `praxis land`: it runs the
+   project check on your work without waiting in the landing line, and landing reuses what passed.
 
 Run `praxis status` at any time to see who is working on what."""
 

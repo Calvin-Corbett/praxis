@@ -21,6 +21,39 @@
   fails until the map knows it: `python tools/affected_tests.py --add` puts it in at once, the safe way (a new test
   file runs with every change, a new source file runs the whole suite), and `--rebuild` makes the map tight again.
   The whole suite stays the safety net: run it as the `full_check`.
+- **A passed check is remembered for the files that check reads.** Until now a pass was remembered for the whole
+  project tree, so with many agents landing, every landing changed the tree and paid for the whole check again. Now
+  a `checks` entry in `praxis.toml` may have a `name`, `inputs = [patterns]` (the files its command reads) and
+  `env_inputs = [names]` (the environment variables it reads). Give every entry a name and the rule changes: EVERY
+  entry whose `paths` match a file your landing changes runs (not only the first), every entry that lists a changed
+  file among its `inputs` runs too, and your default `check` runs as well when no entry's `paths` match. A named
+  check's pass is remembered for exactly the files it reads (git's content ids of the files matching `inputs`, the
+  command text and those variables), so while they stay the same you see "Skipping check ui: it passed at <time> on
+  exactly the files it reads", whatever else landed. A failure is never remembered. Several checks of one landing
+  run one after another, and at the same time while heavy job places are free (`checks_together = false` turns that
+  off). Without any `name`, nothing changes: first match only, and the check cache as before.
+  **What a landing guarantees changes when you declare `inputs`:** from "the exact files that land passed the
+  check" to "every check that reads a file in the landing has passed on exactly those file contents", where "reads"
+  is what you wrote. The audit below and the periodic full check are the net, so keep both on.
+- **An audit that shows you an incomplete `inputs` list.** With `audit_every = N` (default 20, `0` = off), the first
+  pass a check takes from memory and then about one in N is run again anyway, on exactly the version that landed,
+  in a scratch folder (`<project>-praxis/_audit`), in the background, never holding up the landing. If it fails,
+  `praxis status` shows under NEEDS YOU "check <name> passed from memory but fails when run: its inputs list is
+  probably missing files" with the log, drops that check's remembered passes, and runs it every time until you have
+  fixed its `inputs` and run the new `praxis trust <name>`. Praxis never undoes the landing.
+- **`praxis check <agent>`: earn your pass before the landing line.** It builds "the newest main version + the
+  agent's saved work" the way a landing would, in a scratch folder (`<project>-praxis/_check-1`...), runs the checks
+  that landing would run, remembers the passes, and prints which checks passed, were reused or failed (exit code 0
+  or 2). It never moves main, never changes the agent's branch or folder, is not a landing try, and holds one heavy
+  job place. A later `praxis land` finds the passes while the files each check reads are unchanged, and lands in
+  seconds. The agent rules gain one line (run `praxis init` again to refresh `AGENTS.md` and `CLAUDE.md`): when your
+  work is saved, run `praxis check <you>` before `praxis land`.
+- **Batches use the same memory.** A batch whose named checks all have a remembered pass for the files they read
+  lands without running anything, and when a batch fails, the smaller groups run again only the checks whose files
+  differ from what already passed, usually just the one that failed.
+  All of this needs database format 7: Praxis upgrades your project's database the first time the new version opens
+  it (two new tables, `checkpasses` and `checktrust`), and an older Praxis then refuses that project (update it, or
+  use the launcher).
 - **The check can depend on what you change.** Add `checks = [{ paths = ["js/thermo.js", "css/**"], run = "npm run
   test:ui" }, ...]` to `praxis.toml`. For a landing Praxis runs the command of the FIRST entry whose `paths` match
   any file the landing changes, and your normal `check` when none does, so put the strictest entries first. Without

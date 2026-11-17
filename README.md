@@ -199,6 +199,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis start <agent> "<task>" <files...>` | Give an agent its own folder and claim its files. |
 | `praxis claim <agent> <files...>` | Claim more files or folders. Code files can be shared; asset files become locks. |
 | `praxis unclaim <agent> <files...>` | Let go of files. |
+| `praxis check <agent>` | Run the checks of the agent's saved work now, on top of the newest main version, without landing it. `praxis land` reuses the passes. |
 | `praxis land <agent>` | Test the agent's work and add it to the main version. `--done` also finishes it. |
 | `praxis land <agent> --background` | The same, but returns as soon as the landing has its place in line. |
 | `praxis wait <agent>` | Follow a background landing to its end: its output, result and exit code. |
@@ -211,6 +212,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis resume <agent>` | You answered; the agent may carry on. |
 | `praxis release-stale [agent...]` | Free the files of agents that went quiet for a long time (`--force`: even one that may still be working). |
 | `praxis setup <agent>` | Run praxis.toml's `setup` command in the agent's folder again. |
+| `praxis trust <check>` | Remember a named check's passes again, after its audit failed (see "Named checks"). |
 | `praxis launcher` | Write `~/.praxis/bin/praxis`, a launcher at a fixed path, and register this Praxis with it. It keeps running the version it runs now; `--switch` points it at the newest installed Praxis. |
 
 Every command that works in a project also takes `--upgrade-now` (see "Several versions of Praxis").
@@ -238,6 +240,11 @@ its own turn, so a refusal for a clash or for undoing another agent's work still
 agent waiting, landing works exactly as it did before. If the agent at the front is stopped part-way, every agent's
 work is still saved: the next landing records whatever did land, puts the stopped agent's folder back on its own
 branch, and the line carries on. `praxis status` shows who is in a batch. Turn it off, or cap it, with `batch_max`.
+
+A batch uses the same memory of passed checks as a single landing. With named checks (see "Named checks" below), a
+batch whose checks all have a remembered pass for the files they read in the batch lands without running anything.
+When a batch fails, the checks that passed for it are remembered: for each smaller group Praxis runs again only
+the checks whose files differ from what already passed, which is usually just the one that failed.
 
 ### Landing in the background
 
@@ -268,8 +275,9 @@ and a `praxis run --heavy` that sees it joins ahead of the waiting jobs that do 
 check, behind other check jobs in the order they joined. It never stops a job that is already running. The other
 jobs take turns by agent: an agent with nothing running goes before an agent that already has a job running, and
 equal turns go by arrival. `praxis status` lists the waiting jobs in the order they will start and marks a check's
-jobs "landing check". (The full check and an early check get `PRAXIS_CHECK=1` as well. They already hold a heavy
-job place of their own, so a `praxis run --heavy` inside them runs straight away.)
+jobs "landing check". (The full check, an early check, `praxis check`, an audit and a named check that runs beside
+another one get `PRAXIS_CHECK=1` as well. They already hold a heavy job place of their own, so a
+`praxis run --heavy` inside them runs straight away.)
 
 **One agent cannot fill the line.** An agent may have `heavy_waiting_per_agent` jobs (default 3) waiting at once.
 One more `praxis run --heavy` from it is refused with exit code 1 and a message that lists the ones waiting; nothing
@@ -292,7 +300,8 @@ belongs to another project) is ignored and the call waits in line as usual.
 
 Quick checks make a landing fast because they do not test everything every time (`checks` picks a check by the
 files that changed, a check may test only what `PRAXIS_CHANGED_FILES` says the landing changes, the check cache
-skips a tree that already passed, a batch is checked once). The full check is
+skips a tree that already passed, a named check with `inputs` is skipped while the files it reads are the same, a
+batch is checked once). The full check is
 the safety net behind them: one command that tests the WHOLE project, run on the main version every so often. Set
 it in `praxis.toml`:
 
@@ -353,6 +362,74 @@ reached, or batching is off), and only when a heavy job place is free at that mo
 for one). If that agent's work clashes with the work that is landing, there is nothing to check early: it is told
 about the clash on its own turn, as always. It trades CPU for waiting time, so leave it off on a busy machine.
 `praxis status` shows a running early check, and its output goes to `.git/praxis/logs/early-check-*.log`.
+With named checks (below), what an early check hands over is one remembered pass for each check that passed.
+
+### Named checks: a pass is remembered for the files the check reads
+
+With many agents landing, the project's files change with every landing, so "these exact files already passed" is
+almost never true for the next agent, and every landing pays for the whole check again. Named checks fix that: you
+split the check into parts, and tell Praxis which files each part reads.
+
+```
+checks = [
+  { name = "ui",     paths = ["css/**", "js/ui/**"], inputs = ["css/**", "js/ui/**", "package.json"], run = "npm run test:ui" },
+  { name = "server", paths = ["server/**"], inputs = ["server/**", "shared/**"], env_inputs = ["NODE_ENV"], run = "npm run test:server" },
+]
+audit_every = 20
+```
+
+The rules, plainly:
+
+- **Give every entry a `name`, or none.** Without names nothing changes: only the FIRST entry whose `paths` match
+  runs. With names, **every** entry whose `paths` match a file the landing changes runs, and so does every entry
+  that lists a changed file among its `inputs` (it reads that file). When no entry's `paths` match, your default
+  `check` runs as well, as it always did for files no entry covers.
+- **`inputs`** are the files the command reads, written like `paths`. Praxis remembers a pass of that check for
+  exactly those files: it asks git for the content ids of every file matching `inputs` in what is about to land
+  (it never reads the files), and adds the command's text and the values of the environment variables named in
+  **`env_inputs`**. The next time the same check is due and all of that is the same, it is skipped:
+  "Skipping check ui: it passed at <time> on exactly the files it reads". Whatever else changed in the project does
+  not matter. Without `inputs` a named check reads the whole project, and its pass counts only for the exact same
+  files, like the check cache.
+- A failure is never remembered. The newest 200 passes of each check are kept.
+- Several checks of one landing run one after another. While heavy job places are free (`heavy_jobs`), a check
+  beyond the first runs at the same time and holds a place while it does, so the limit is never passed. They run
+  in the same folder: if yours cannot share it, set `checks_together = false`.
+- The landing output and `praxis status` name each check, and say which passes came from memory, for example
+  "check passed (ui from memory, server)".
+
+**What a landing guarantees changes when you declare `inputs`.** Without them: the exact files that land passed the
+check. With them: **every check that reads a file in the landing has passed on exactly those file contents**, where
+"reads" means what you wrote in `inputs`. If a check reads a file its `inputs` leave out, a pass can be taken from
+memory for a version that check would fail on. Two things are the net behind that, so keep both on:
+
+- **The audit** (`audit_every`, default 20; `0` turns it off). The first pass a check takes from memory, and then
+  about one in 20, is run again anyway: on exactly the version that landed, in a scratch folder of Praxis's own
+  (`<project>-praxis/_audit`), in the background, holding a heavy job place, never holding up the landing that
+  used the pass. If it fails there, `praxis status` shows under NEEDS YOU "check ui passed from memory but fails
+  when run: its inputs list is probably missing files", with the log. That check's remembered passes are dropped
+  and it runs every time, with nothing remembered, until you have added the missing files to its `inputs` and run
+  `praxis trust ui`. Praxis never undoes the landing that used the pass.
+- **The periodic full check** (`full_check`, above), which tests the whole project whatever the `inputs` say.
+
+### Checking before the landing line
+
+`praxis check <agent>` runs the checks of an agent's saved (committed) work without landing it and without waiting
+in the landing line. It builds what a landing would build right now, the newest main version with the agent's
+commits on top, in a scratch folder of Praxis's own (`<project>-praxis/_check-1`, `_check-2`...), runs the checks
+that landing would run, and remembers the ones that pass. It prints which checks passed, were reused from memory,
+or failed, and ends with exit code 0 when all passed and 2 when not.
+
+It never moves the main version, never changes the agent's branch, and never touches the agent's folder, so the
+agent can keep working while it runs. A failure is not a landing try: nothing is recorded against the agent. It
+holds one heavy job place while it runs (and waits for one like any heavy job), so no more of them run at once
+than `heavy_jobs`, and no more scratch folders than that are made. The scratch folders hold only what is committed;
+`share` folders are linked into them and `setup` runs in each once, as for the full check.
+
+A later `praxis land` finds those passes. With `inputs`, a check is skipped as long as the files it reads are the
+same, however many other agents landed in between, so the landing takes seconds. A check without `inputs` reads
+the whole project: its pass is found only if nothing else landed meanwhile. The agent rules tell every agent to
+run `praxis check` when its work is saved, before `praxis land`.
 
 ### Exit codes
 
@@ -427,6 +504,15 @@ For a landing Praxis looks at the files the landing changes and runs the `run` c
 entries that must always win first. Patterns are read from the top of the project like the other path settings
 (`*` stays inside one folder, `**` spans folders). Without `checks`, nothing changes. The landing output and
 `praxis status` name the check that was used, for example "check passed (check 1 of `checks` (css/**))".
+That first-match rule holds as long as no entry has a `name`. Give every entry a `name` and every matching entry
+runs, each with a memory of its own for the files it reads (`inputs`, `env_inputs`): see "Named checks" above.
+
+**`audit_every`** (default `20`): with named checks that list `inputs`, the first pass a check takes from memory and
+then about one in this many is run again in the background to make sure the `inputs` list is complete (see "Named
+checks" above). `0` turns the audit off; then only the full check stands behind `inputs`.
+
+**`checks_together`** (default `true`): when one landing has several named checks to run, the ones beyond the first
+run at the same time, in the same folder, while heavy job places are free. `false` runs them one after another.
 
 **What a landing changes, for the check.** A check command can also decide for itself, file by file. For every
 landing's check (`check` or a `checks` entry, a batch's one check, an early check) Praxis sets `PRAXIS_BASE`, the
@@ -456,7 +542,10 @@ check command, Praxis does not run the check again and says "Skipping the check:
 <time>". The command text must be identical: change the command in praxis.toml and nothing is reused. A failure
 is never remembered, and the newest 200 passes are kept in the project database (database format 4). A check
 that depends on something outside the files (the date, a web service) can pass today and fail tomorrow on the
-same tree; keep such a check out of what you rely on, or change its command text to start fresh.
+same tree; keep such a check out of what you rely on, or change its command text to start fresh. This is the
+memory of the default `check` and of `checks` entries without names: with no `inputs` anywhere in praxis.toml,
+nothing about it changed. A named check has a memory of its own, keyed by the files it reads (see "Named checks"
+above; database format 7).
 
 **`branch_prefix`** (default `"praxis/"`): the start of every agent's branch name. It must be the start of a
 valid git branch name and end with `/`, for example `"agents/"`.
@@ -567,6 +656,11 @@ says nothing, or less than the batch needs, lands on its own turn.
 - **The full check is failing.** The test of the whole project (`full_check`) failed on the main version. Praxis
   shows whose landing broke it, the commit, the log, and the exact `git revert` command that undoes it. Praxis does
   not undo it for you: run the command in the main folder, or have an agent land a fix, then run `praxis fullcheck`.
+- **A check passed from memory but fails when run.** The audit ran a named check again that a landing had skipped
+  because of a remembered pass, and it failed: its `inputs` list is probably missing files the check reads. Praxis
+  shows the check, the landing that used the pass and the log, has dropped that check's remembered passes, and runs
+  it every time from now on. Add the missing files to its `inputs` in praxis.toml, then run `praxis trust <check>`.
+  If that landing broke the project, have an agent land a fix: Praxis never undoes a landing by itself.
 - **An agent went quiet.** If an agent still holds files but has shown no sign of work for a long time
   (24 hours by default, `stale_after_hours` in praxis.toml), Praxis shows it. If that agent has stopped for
   good, run `praxis release-stale <name>` so others can use its files. Its folder and work are kept.
@@ -717,6 +811,10 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 - The full check's scratch folder: `<project>-praxis/_fullcheck`, on no branch. Its runs are recorded in the
   database (format 5), and their output is in `.git/praxis/logs/full-check-*.log`.
 - The check cache (the newest 200 passes) and the heavy job queue are in the same database; each job's output goes to `.git/praxis/logs/<agent>-heavy-<time>.log`.
+- The scratch folders of `praxis check`: `<project>-praxis/_check-1`, `_check-2`... (as many as checks ran at once),
+  and the audit's: `<project>-praxis/_audit`. All on no branch, kept between runs. The named checks' remembered passes
+  (the newest 200 of each) and the audit's count and verdict are in the database (format 7: tables `checkpasses` and
+  `checktrust`); an audit's output is in `.git/praxis/logs/audit-*.log`.
 - Background landings write to `.git/praxis/background/<agent>.log`; setup, after_land and check output go to
   `.git/praxis/logs/`.
 
