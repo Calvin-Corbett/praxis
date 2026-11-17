@@ -453,7 +453,7 @@ It is one extra folder for the project, however many agents land: a copy of the 
 
 **It is off unless you set it, because the two ways of checking are not the same for every project.** They agree
 on the files git tracks (exactly the candidate), the command, what the command is told (`PRAXIS_AGENT`,
-`PRAXIS_TASK`, `PRAXIS_CHECK`, `PRAXIS_BASE`, `PRAXIS_CHANGED_FILES` and your `env`), and the memory of passed
+`PRAXIS_TASK`, `PRAXIS_CHECK`, `PRAXIS_BASE`, `PRAXIS_CHANGED_FILES`, `PRAXIS_ROOT` and your `env`), and the memory of passed
 checks: a pass is remembered by the files and the command, never by the folder, so a pass earned one way counts
 the other way too. They can differ in four things:
 
@@ -662,6 +662,18 @@ neither variable, because it tests everything. Two rules keep such a check safe:
 nothing about, or gets no list, it runs everything; and `full_check` is set behind it. On Windows a check that runs
 in WSL sees only the variables you name in `WSLENV`: add `env = { WSLENV = "PRAXIS_CHANGED_FILES/p:PRAXIS_BASE" }`
 (the `/p` turns the Windows path into a WSL one).
+
+**Where the project's main folder is, for the check.** Every check (all the ones above, the full check, its
+search for the landing it starts to fail at, and an audit) is told `PRAXIS_ROOT`: the full path of the project's
+main folder, the one Praxis itself found, whichever folder the check runs in and whichever folder `praxis land` was
+started from. A check can trust it, unlike anything it works out from the agent's folder (the folder's `.git` file
+and the `GIT_DIR` of the environment are the agent's to change): Praxis sets it after copying the environment it was
+started with, so a `PRAXIS_ROOT` that was already there is replaced, and `env` in `praxis.toml` cannot set it
+either. Use it to run code that must come from the main version, for example `python "$PRAXIS_ROOT/tools/gate.py"`.
+Nothing about it goes into what a check remembers (see "Named checks"): moving the project folder keeps every
+remembered pass, unless a check lists `PRAXIS_ROOT` in its `env_inputs`. No setting turns it on. `setup`, `after_land`,
+`after_done`, a `generated` rebuild and `praxis run --heavy` are told it too. On Windows a check that runs in WSL
+needs it in `WSLENV` as well: `WSLENV = "PRAXIS_ROOT/p"` (with `PRAXIS_CHANGED_FILES/p` and `PRAXIS_BASE`, as above).
 
 **`full_check`** and **`full_check_every`** (default `""` and `0`): the command that tests the whole project, and
 after how many landings Praxis runs it on the main version by itself (see "The full check" above). `0` means only

@@ -293,7 +293,7 @@ class Outcome:
 def look(ctx: Ctx, folder: Path, checked: str, checks: list[Check]) -> Outcome:
     """What is already known about the candidate *checked*: every check with a remembered pass is "reused"."""
     outcome = Outcome([Step(check) for check in checks])
-    _recall(ctx.store, Keys(folder, checked, hooks.command_env(ctx.cfg)), outcome.steps)
+    _recall(ctx.store, Keys(folder, checked, hooks.command_env(ctx.cfg, ctx.repo.root)), outcome.steps)
     return outcome
 
 
@@ -364,7 +364,7 @@ def run(
     steps = outcome.steps
     if not steps:
         return outcome
-    keys = Keys(folder, checked, hooks.command_env(ctx.cfg))
+    keys = Keys(folder, checked, hooks.command_env(ctx.cfg, ctx.repo.root))
     if not _recall(ctx.store, keys, steps) and wait_for is not None and keys.tree:
         wait_for(keys.tree, signature(checks), lambda: time.time() if _recall(ctx.store, keys, steps) else None)
     for step in steps:

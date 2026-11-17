@@ -16,13 +16,21 @@ from agent_praxis import gitops, shells
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW: a console program gets no window of its own
 TAIL_LINES = 20
+ROOT_ENV = "PRAXIS_ROOT"  # the project's main folder, in the environment of every command Praxis runs for the project
 
 
-def command_env(cfg, **praxis_vars: str) -> dict[str, str]:
-    """The environment for a project command: Praxis's own, then praxis.toml's env table, then PRAXIS_* values."""
+def command_env(cfg, root: Path | str, **praxis_vars: str) -> dict[str, str]:
+    """The environment for a project command: Praxis's own, then praxis.toml's env table, then PRAXIS_* values.
+    *root* is the project's main folder, the one Praxis itself found. It goes in last, as PRAXIS_ROOT, so nothing
+    set before it counts: not the environment of whoever ran Praxis, not the `env` table, not *praxis_vars*. A
+    command can trust it, which it cannot do for a folder it works out from the agent's folder."""
     env = dict(os.environ)
     env.update(cfg.env)
     env.update(praxis_vars)
+    if os.name == "nt":  # Windows does not tell upper from lower case in a variable's name
+        for key in [key for key in env if key.upper() == ROOT_ENV]:
+            del env[key]
+    env[ROOT_ENV] = str(root)
     env.setdefault("PYTHONIOENCODING", "utf-8")  # a Python command printing a non-English path must not crash
     return env
 
@@ -77,7 +85,7 @@ def run_setup(ctx, row) -> bool:
     name, folder = row["name"], Path(row["worktree"])
     log = new_log(ctx.store.dir / "logs", f"{name}-setup")
     ctx.say(f"Running the setup command in {name}'s folder: {command}")
-    env = command_env(ctx.cfg, PRAXIS_AGENT=name, PRAXIS_TASK=row["task"])
+    env = command_env(ctx.cfg, ctx.repo.root, PRAXIS_AGENT=name, PRAXIS_TASK=row["task"])
     code = run_logged(command, folder, env, log, ctx)
     if code == 0:
         ctx.say(f"Setup finished. Its output: {log}")
@@ -95,7 +103,7 @@ def run_after_land(ctx, row, commit: str) -> None:
     if not command:
         return
     log = new_log(ctx.store.dir / "logs", f"{row['name']}-after-land")
-    env = command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"], PRAXIS_COMMIT=commit)
+    env = command_env(ctx.cfg, ctx.repo.root, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"], PRAXIS_COMMIT=commit)
     try:
         code = run_logged(command, ctx.repo.root, env, log, ctx)
     except OSError as exc:
@@ -115,7 +123,7 @@ def run_after_done(ctx, row) -> None:
     if not command:
         return
     log = new_log(ctx.store.dir / "logs", f"{row['name']}-after-done")
-    env = command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
+    env = command_env(ctx.cfg, ctx.repo.root, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"])
     try:
         code = run_logged(command, ctx.repo.root, env, log, ctx)
     except OSError as exc:

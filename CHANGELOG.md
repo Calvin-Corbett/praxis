@@ -37,6 +37,19 @@
   allows, and no command printed a refusal. It takes minutes: `pytest -m "not mixed"` leaves it out, and it skips
   itself in a copy of the project without git history. If you change Praxis, the top of that file says how to move
   its baseline at each release.
+- **Your check is told where the project's main folder is: `PRAXIS_ROOT`.** Every check Praxis runs (a landing's,
+  in the agent's folder or in the line's own folder; a batch's and each step that looks for the culprit; an early
+  check; `praxis check`; the full check and its search for the landing it starts to fail at; an audit) now gets
+  `PRAXIS_ROOT`, the full path of the main folder Praxis itself found, never the scratch folder or the agent's
+  folder the check runs in. A check that wants to run trusted code from the main version can use it instead of
+  working the folder out with git from inside the agent's folder, which the agent can steer (`GIT_DIR`, a rewritten
+  `.git` file). Praxis sets it after it has copied the environment it was started with, so a `PRAXIS_ROOT` that was
+  already there, or one in your `env`, is replaced and never trusted. `setup`, `after_land`, `after_done`, a
+  `generated` rebuild and `praxis run --heavy` are told it too. It is not part of what a check remembers: moving the
+  project folder keeps every remembered pass, unless a check lists `PRAXIS_ROOT` in its `env_inputs`. There is no
+  new setting, and a check that never reads it behaves as before. If your check runs in WSL on Windows, add
+  `PRAXIS_ROOT/p` to `WSLENV`. `PRAXIS_AGENT`, `PRAXIS_TASK`, `PRAXIS_CHECK`, `PRAXIS_BASE` and
+  `PRAXIS_CHANGED_FILES` were already set after the copy; a new test says so for each of them.
 - **Your check can test only what a landing changes.** For every landing's check Praxis now sets `PRAXIS_BASE` (the
   commit of the main version your work was put on top of) and `PRAXIS_CHANGED_FILES` (the path of a text file
   listing the files the landing changes, one per line, from the top of the project). Your check command can read

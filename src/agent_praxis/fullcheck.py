@@ -345,7 +345,7 @@ def _scratch(ctx: Ctx, commit: str, name: str = SCRATCH) -> Path:
         _put_files(folder, commit)
         log = hooks.new_log(ctx.store.dir / "logs", "full-check-setup")
         ctx.say(f"Running the setup command in Praxis's scratch folder {folder}: {setup}")
-        env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=WHO["name"], PRAXIS_TASK=WHO["task"])
+        env = hooks.command_env(ctx.cfg, ctx.repo.root, PRAXIS_AGENT=WHO["name"], PRAXIS_TASK=WHO["task"])
         code = hooks.run_logged(setup, folder, env, log, ctx)
         if code != 0:
             raise PraxisError(

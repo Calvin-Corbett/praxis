@@ -331,7 +331,7 @@ def run(ctx, command: list[str], poll: float = POLL_SECONDS) -> int:
 
 
 def _execute(ctx, command: list[str], text: str, agent: str, mine: int | None, token: str) -> int:
-    env = hooks.command_env(ctx.cfg)
+    env = hooks.command_env(ctx.cfg, ctx.repo.root)
     env[TOKEN_ENV] = token
     if agent != "(nobody)":
         env.setdefault("PRAXIS_AGENT", agent)

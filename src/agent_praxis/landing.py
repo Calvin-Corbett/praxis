@@ -702,7 +702,8 @@ def _run_check(ctx: Ctx, row, folder: Path, command: str, base: str | None = Non
     names a text file listing the files in *changed*, one per line. Without it (the full check, which tests
     everything) neither is set, not even when Praxis itself was started with them."""
     # PRAXIS_CHECK: a `praxis run --heavy` inside the check knows a landing waits on it, and goes first (heavy.py).
-    env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"], PRAXIS_CHECK="1")
+    env = hooks.command_env(ctx.cfg, ctx.repo.root, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"],
+                            PRAXIS_CHECK="1")
     logs = ctx.store.dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = _new_log(logs, row["name"])
