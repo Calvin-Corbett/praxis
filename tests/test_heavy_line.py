@@ -2,7 +2,8 @@
 landing check's jobs go first, and one agent cannot fill the line.
 
 The other jobs in these tests are fakes: rows in the heavy table whose lock files the test keeps locked, so Praxis
-sees live jobs that never use the CPU. The load is always a fake reader.
+sees live jobs that never use the CPU. The load is always a fake reader. A fake says in its lock file which Praxis
+started it, as a real job does: this one, or an older one that starts its jobs by another rule.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import edit, folder, praxis, praxis_process
 
-from agent_praxis import config, heavy, load
+from agent_praxis import config, heavy, live, load
 from agent_praxis import store as store_module
 from agent_praxis.config import Config
 from agent_praxis.errors import PraxisError
@@ -45,9 +46,17 @@ class Line:
         self.handles: dict[int, object] = {}
         (self.store.dir / "heavy").mkdir(exist_ok=True)
 
-    def add(self, agent: str, command: str = "pytest -q", running: bool = False, check: bool = False, pid=None) -> int:
+    def add(self, agent: str, command: str = "pytest -q", running: bool = False, check: bool = False, pid=None,
+            praxis: int = heavy.PLACED) -> int:
+        """*praxis*: the rule of the Praxis that started the job. heavy.PLACED is this Praxis, heavy.TURNS one of
+        database format 6 or 7 (it says its format and nothing more), heavy.JOINED one from before the register
+        (its file is empty)."""
         token = uuid.uuid4().hex
         handle = open(self.store.dir / "heavy" / f"{token}.lock", "a+b")  # noqa: SIM115 - held open on purpose: the lock lives as long as the handle
+        if praxis == heavy.PLACED:
+            live.stamp(handle, pid=pid, format=store_module.FORMAT, version="this", order=heavy.PLACED)
+        elif praxis == heavy.TURNS:
+            live.stamp(handle, pid=pid, format=6, version="older")
         assert _try_lock(handle)
         with self.store.write() as db:
             row = db.execute(
@@ -313,6 +322,116 @@ def test_status_lists_landing_checks_first_and_says_so(project, line):
         "- waiting: alice, joined just now: pytest tests/a2",
     ], out
     assert "waiting jobs start from the top" in out
+
+
+# Jobs of an older Praxis in the same line ----------------------------------------------------------------------------
+
+
+def _ordered(rule: dict, *jobs: dict) -> list[int]:
+    return [j["id"] for j in heavy.in_order(list(jobs), rule)[1]]
+
+
+def test_a_job_says_in_its_file_which_rule_it_starts_by(line):
+    mine, turns, joined = line.add("alice"), line.add("bob", praxis=heavy.TURNS), line.add("carol", praxis=heavy.JOINED)
+    assert heavy.rules(line.store, heavy.rows(line.store)) == {
+        mine: heavy.PLACED,
+        turns: heavy.TURNS,
+        joined: heavy.JOINED,
+    }
+
+
+def test_a_job_of_an_older_praxis_keeps_the_place_it_joined_at():
+    """It starts when every job that joined before it has started, whatever this Praxis thinks should go first. So
+    this Praxis orders its own jobs around it, and no two jobs ever wait for each other."""
+    jobs = [_job(1, "alice", running=True), _job(2, "bob"), _job(3, "old"), _job(4, "carol", check=True),
+            _job(5, "alice"), _job(6, "dan")]  # fmt: skip
+    rule = {3: heavy.JOINED}
+    assert _ordered(rule, *jobs) == [2, 3, 4, 6, 5], "the landing check goes first among the jobs behind the old one"
+    assert _ordered({}, *jobs) == [4, 2, 3, 6, 5], "with only this Praxis's jobs it would have gone before them all"
+    assert [j["id"] for j in heavy._in_front(jobs, 4, rule)] == [1, 2, 3], "what the landing check waits for"
+    assert [j["id"] for j in heavy._in_front(jobs, 2, rule)] == [1], "bob does not wait for the landing check"
+
+
+def test_an_older_job_counts_as_its_agents_turn_for_the_jobs_behind_it():
+    jobs = [_job(1, "alice"), _job(2, "alice"), _job(3, "bob")]
+    assert _ordered({1: heavy.JOINED}, *jobs) == [1, 3, 2]
+
+
+def test_with_jobs_of_three_praxis_generations_nobody_holds_a_place_for_anybody():
+    """A job of format 6 or 7 takes no notice of an older job and may be waiting for this Praxis's landing check:
+    if that check waited for the older job, and the older job for the format 6 one, none of the three would start."""
+    jobs = [_job(1, "alice", running=True), _job(2, "bob"), _job(3, "old"), _job(4, "carol", check=True)]
+    rule = {2: heavy.TURNS, 3: heavy.JOINED}
+    assert _ordered(rule, *jobs) == [4, 2, 3]
+    assert heavy.fixed([j for j in jobs if not j["started"]], rule) == set()
+    said = heavy._goes_first(jobs, rule, 4)
+    assert "goes ahead of the waiting jobs of this Praxis" in said and "may still start before it" in said
+
+
+def test_a_landing_check_does_not_take_the_place_an_older_job_is_first_in_line_for(line):
+    running = line.add("alice", running=True)
+    old = line.add("bob", praxis=heavy.JOINED)
+    check = line.add("carol", check=True)
+    go, ahead = heavy._try_start(line.store, check, 2)  # a place is free, and the older job is in front of it
+    assert not go and line.ids(ahead) == [running, old]
+    with line.store.write() as db:  # the older job takes the place, by its own rule
+        db.execute("UPDATE heavy SET started = ? WHERE id = ?", (time.time(), old))
+    assert heavy._try_start(line.store, check, 2)[0] is False, "now two are running"
+    line.end(running)
+    assert heavy._try_start(line.store, check, 2) == (True, [])
+
+
+def test_a_waiting_landing_check_says_the_truth_about_an_older_job_in_front(project, line, monkeypatch):
+    _set(project, "heavy_jobs", 1)
+    holder = line.add("alice", running=True)
+    old = line.add("bob", "npm test", praxis=heavy.JOINED)
+    monkeypatch.setenv("PRAXIS_AGENT", "carol")
+    monkeypatch.setenv(heavy.CHECK_ENV, "1")
+    proc = praxis_process(project, "run", "--heavy", *_py("print('checked')"))
+    try:
+        deadline = time.time() + 60
+        while time.time() < deadline and len(heavy.rows(line.store)) < 3:
+            time.sleep(0.2)
+        status = praxis("status")[1]
+        listed = [ln.strip() for ln in status.splitlines() if ln.strip().startswith(("- running:", "- waiting:"))]
+        assert [ln.split(",")[0] for ln in listed] == [
+            "- running: alice",
+            "- waiting: bob (an older Praxis: keeps the place it joined at)",
+            "- waiting: carol (landing check)",
+        ], status
+        assert "a job of an older Praxis starts strictly in the order the jobs joined" in status
+        line.end(holder)  # the place is free: it is the older job's
+        time.sleep(2)
+        assert proc.poll() is None, "the landing check did not take the place of the older job in front of it"
+        with line.store.write() as db:
+            db.execute("UPDATE heavy SET started = ? WHERE id = ?", (time.time(), old))
+        time.sleep(1)
+        assert proc.poll() is None
+        line.end(old)
+        out = proc.communicate(timeout=120)[0]
+        assert proc.returncode == 0, out
+        assert "goes ahead of the waiting jobs of this Praxis that do not" in out, out
+        assert "1 job(s) of an older Praxis joined the line before it and start first" in out, out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=60)
+
+
+def test_status_says_when_the_order_cannot_be_promised(project, line):
+    line.add("alice", "pytest tests/a", running=True)
+    line.add("bob", "pytest tests/b", praxis=heavy.TURNS)
+    line.add("old", "pytest tests/c", praxis=heavy.JOINED)
+    line.add("carol", "pytest tests/d", check=True)
+    out = praxis("status")[1]
+    listed = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("- waiting:")]
+    assert listed == [
+        "- waiting: carol (landing check), joined just now: pytest tests/d",
+        "- waiting: bob, joined just now: pytest tests/b",
+        ("- waiting: old (an older Praxis: starts when every job that joined before it has), joined just now: "
+         "pytest tests/c"),
+    ], out
+    assert "jobs of three Praxis versions are waiting" in out
 
 
 RECORD_CHECK = "import os, sys\nopen(sys.argv[1], 'a').write(os.environ.get('PRAXIS_CHECK', 'not set') + '\\n')\n"

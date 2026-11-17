@@ -39,8 +39,11 @@ When things go wrong:
   praxis unclaim <agent> <files...>             let go of files
   praxis setup <agent>                          run praxis.toml's setup command in the agent's folder again
   praxis trust <check>                          remember a named check's passes again, after its audit failed
+  praxis update [--when-safe]                   after installing a new Praxis: register it, look at your projects,
+                                                and make the launcher run it when no command at work would be
+                                                refused; --when-safe waits for that moment and switches then
   praxis launcher [--switch]                    register this Praxis with the stable per-user launcher; --switch
-                                                makes the launcher run the newest installed Praxis
+                                                makes the launcher run the newest installed Praxis without looking
 
 You can update Praxis while agents work. A newer Praxis only adds to a project's database, so commands of the older
 one (running, or started later) carry on beside it; `praxis status` names them. Only when a newer Praxis must change
@@ -142,6 +145,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--taken", default="")
 
     sub.add_parser("status", help="show who is doing what")
+    s = sub.add_parser("update", help="make the launcher run this Praxis, when that is safe in every project")
+    s.add_argument("--when-safe", action="store_true",
+                   help="when commands of an older Praxis must finish first: wait for them here, then switch")
     s = sub.add_parser("launcher", help="register this Praxis with the launcher at ~/.praxis/bin")
     s.add_argument("--switch", action="store_true",
                    help="make the launcher run the newest installed Praxis (without it, the launcher keeps running "
@@ -162,7 +168,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true",
                    help="release even an agent with programs running in its folder, unsaved edits or a landing in line")
     for name, s in sub.choices.items():
-        if name not in ("init", "launcher"):  # the two that never open the project's database
+        if name not in ("init", "launcher", "update"):  # the three that never open a project's database to use it
             # SUPPRESS: given before the command (`praxis --upgrade-now status`) it is not reset by the command's own.
             s.add_argument("--upgrade-now", action="store_true", default=argparse.SUPPRESS, help=upgrade_help)
             s.add_argument("--even-with-older-landings", action="store_true", default=argparse.SUPPRESS,
@@ -186,6 +192,8 @@ def _ctx(args=None, argv: tuple | list = ()) -> tuple[Ctx, Store]:
                  "with an error: run that one again with this Praxis.")
         for row in store.agents():  # git hooks in an agent's folder can tell which agent is committing
             gitops.agent_folder(row["worktree"], row["name"], row["task"])
+        from agent_praxis import update
+        update.remember(repo.root, repo.state_dir)  # so `praxis update` knows this project is one to look at
     except BaseException:
         store.close()
         raise
@@ -211,6 +219,9 @@ def run(argv: list[str]) -> int:
         from agent_praxis import launcher
         launcher.write_launcher(_say, switch=args.switch)
         return 0
+    if args.command == "update":
+        from agent_praxis import update
+        return update.run(_say, when_safe=args.when_safe)
     ctx, store = _ctx(args, argv)
     try:
         cmd = args.command

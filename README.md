@@ -64,14 +64,16 @@ when you update. Run `praxis launcher` once: it writes `~/.praxis/bin/praxis` (a
 `PRAXIS_HOME` to use another folder than `~/.praxis`). That launcher runs the Praxis you made it with, so you can put
 its full path in your agents' instructions and leave it.
 
-**The launcher never switches by itself.** After you install a new version, run `praxis launcher` once with it. That
-only registers the new install: the launcher keeps running the version it ran before, and the command tells you
-which version the launcher runs now, which is the newest, and the exact command that switches. When you choose to
-switch (any time: agents in the middle of a landing or a heavy job carry on), run that command:
-`praxis launcher --switch` with the new version. It points the launcher at the newest installed Praxis; among
-installs of the same version, the one you ran it from wins. If the version the launcher runs is uninstalled, the
-launcher runs the newest one that is left. The launcher only chooses which Praxis runs; see "Updating Praxis
-while agents work" for what happens in a project while two versions are at work in it.
+**The launcher never switches by itself.** After you install a new version, run `praxis update` once with it:
+it registers the new install, looks at your projects, and points the launcher at the new version when no command
+at work would be refused (see "Updating Praxis while agents work"; agents in the middle of a landing or a heavy job
+carry on). The two steps also exist on their own. `praxis launcher` only registers the install: the launcher keeps
+running the version it ran before, and the command tells you which version the launcher runs now and which is the
+newest. `praxis launcher --switch` switches without looking at any project. Either way the launcher is pointed
+at the newest installed Praxis; among installs of the same version, the one you ran the command from wins. If the
+version the launcher runs is uninstalled, the launcher runs the newest one that is left. The launcher only chooses
+which Praxis runs; see "Updating Praxis while agents work" for what happens in a project while two versions are at
+work in it.
 
 ---
 
@@ -214,6 +216,7 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis setup <agent>` | Run praxis.toml's `setup` command in the agent's folder again. |
 | `praxis trust <check>` | Remember a named check's passes again, after its audit failed (see "Named checks"). |
 | `praxis launcher` | Write `~/.praxis/bin/praxis`, a launcher at a fixed path, and register this Praxis with it. It keeps running the version it runs now; `--switch` points it at the newest installed Praxis. |
+| `praxis update` | After installing a new Praxis: register it, look at every project Praxis is used in, and point the launcher at it when no command at work would be refused. `--when-safe` waits for that moment. |
 
 Every command that works in a project also takes `--upgrade-now` and `--even-with-older-landings` (see "Several
 versions of Praxis").
@@ -742,8 +745,38 @@ an older Praxis started keeps the number it has, so the Praxis that made it keep
 than that number refuses every command ("This project was used by a newer Praxis") and changes nothing: that
 refusal is built into the versions already released and cannot be taken out of them, so update that Praxis.
 
-To move your agents to the new version, install it and point the launcher at it (see "One path that survives
-updates" under Install). Do it whenever you like: no agent has to be idle.
+**How to update.** Install the new version (it goes into a folder of its own, next to the old one). Then run
+this once, with the new version:
+
+```
+praxis update
+```
+
+It registers the new version with the launcher, looks at every project Praxis is used in, and says for each one
+what the new version's first command will do there:
+
+```
+Projects Praxis is used in (2), and what switching to this Praxis means for each:
+  - C:\games\tiny: safe now: this Praxis only adds to its database (format 6 to 8).
+      Commands of an older Praxis are at work there and carry on beside this one: praxis land alice (pid 4242, ...)
+  - C:\games\other: safe now: its database (format 8) needs nothing from this Praxis.
+Switched: it ran C:\...\old\python.exe before.
+```
+
+When every project is safe, which is the usual case, it points the launcher at the new version and exits with
+code 0. From then on every `praxis` an agent starts through the launcher is the new one, and what the older one
+is still doing carries on. Agents do not have to be idle, and you do not have to wait for a quiet moment.
+
+Only when the new version must change a project's database in a way the older one cannot use (a breaking step,
+see below) is there something to wait for. Then `praxis update` names the commands of the older Praxis that are
+still running there, leaves the launcher as it is and exits with code 1: switching at that moment would get the new
+version's `praxis land` refused in that project until those commands have finished. Run it again when they have,
+or run `praxis update --when-safe`: it stays in the foreground, waits for them (as long as it takes; Ctrl+C stops
+the waiting and changes nothing), and switches the moment the last one has finished.
+
+Praxis knows a project from the moment one of its commands has run there: each leaves one small file with the
+project's path in `~/.praxis/projects/`. A project where only a Praxis from before `praxis update` has run is not
+known yet; run `praxis update` from inside that project and it is looked at too.
 
 ### Several versions of Praxis
 
@@ -806,6 +839,23 @@ No Praxis version takes a landing of another version into its batch (see "Batche
 writes into its place in the line which batch messages it understands, and a head of the line takes only places
 that say what it says itself. A Praxis from before that rule cannot be changed any more, so a newer `praxis land`
 also marks its place in a way that Praxis has always left alone.
+
+Heavy jobs of several versions wait in one line too, and each waiting job decides by itself when it starts, by
+the rule of the Praxis that started it. A Praxis before format 6 starts its jobs strictly in the order they
+joined. So this Praxis never starts a job before such an older job that joined first, not even a landing check's
+job: it puts its own jobs in order around the older one (those that joined before it, then it, then the rest),
+`praxis status` lists the line in exactly that order, and a landing check's job that waits behind an older job
+says so instead of claiming it goes first. The limit (`heavy_jobs`) holds for all of them together.
+
+**If you change Praxis itself.** Every step in `store.py` says whether it is additive or breaking, and a test
+checks that a step called additive only adds a table or a column with a default. Keep steps additive whenever you
+can: a breaking step is the only thing that makes an update wait. `tests/test_mixed_versions.py` is the gate: it
+builds the last released Praxis from git, puts its landings and heavy jobs in flight in a real project, switches
+to the new code with `praxis update` in the middle, and passes only if every job ends with its own exit code,
+every landing of both versions lands, the heavy limit is never exceeded and no command printed a refusal. It
+takes minutes, so it is marked: `pytest -m "not mixed"` leaves it out, plain `pytest` runs it, and it skips
+itself where there is no git history to build the older version from. At each release, set `BASELINE` in that
+file to the released commit (the top of the file says how).
 
 ---
 

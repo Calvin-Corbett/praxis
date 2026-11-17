@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -223,6 +224,85 @@ def test_the_launcher_does_not_get_past_the_database_format_refusal(project, hom
     conn.close()
     done = _run(home, "status", cwd=str(project))
     assert done.returncode == 1 and "newer Praxis" in done.stderr + done.stdout
+
+
+def _windows_launcher_of_an_older_praxis(pythons: list[str]) -> bytes:
+    """praxis.cmd as every Praxis wrote it before the exit code moved onto the line that runs Praxis."""
+    lines = ["@echo off", f"rem {launcher.ABOUT}"]
+    for n, py in enumerate(pythons, 1):
+        lines += [f'if not exist "{py}" goto next{n}', f'"{py}" -m agent_praxis %*', "exit /b %errorlevel%", f":next{n}"]
+    lines += ["echo Praxis: no installed version was found. 1>&2", "exit /b 1"]
+    return ("\r\n".join(lines) + "\r\n").encode()
+
+
+def test_a_rewritten_windows_launcher_has_the_line_a_running_one_reads_on_at():
+    """cmd.exe reads a batch file again when a command in it ends, from the byte it had reached. A launcher that is
+    running a Praxis command while `praxis update` rewrites it must find, at that byte, the line it was going to
+    read: end with the command's exit code."""
+    old = _windows_launcher_of_an_older_praxis([r"C:\old\python.exe", r"C:\older\python.exe"])
+    at = launcher._read_on_at(old)
+    assert len(at) == 2 and all(old[n:].startswith(b"exit /b %errorlevel%\r\n") for n in at)
+    assert all(old[:n].endswith(b" -m agent_praxis %*\r\n") for n in at), "right after the lines that run Praxis"
+
+    newer = [r"C:\a folder with a much longer name than before\new\python.exe", r"C:\old\python.exe"]
+    new = launcher._cmd(newer, at)
+    for n in at:
+        assert new[n:].startswith(b"exit /b %errorlevel%\r\n") and new[:n].endswith(b"\r\n"), new
+    own = b" -m agent_praxis %* & call exit /b %%errorlevel%%\r\n"
+    assert new.count(own) == 2, "its own lines hold the exit on the same line, and need no reading on"
+    assert b"goto run\r\n" in new[: at[0]] and new.index(b":run\r\n") > at[-1], "and is never run from the top"
+
+    assert launcher._read_on_at(new) == at, "the next rewrite keeps them: that command may still be running"
+    shorter = launcher._cmd([r"C:\p.exe"], launcher._read_on_at(new))
+    assert all(shorter[n:].startswith(b"exit /b %errorlevel%\r\n") for n in at)
+    assert launcher._read_on_at(launcher._cmd(newer)) == [], "a launcher nobody could be running needs none"
+
+
+def test_the_windows_launcher_still_says_which_praxis_it_runs_to_every_praxis_version():
+    """An older Praxis finds the program the launcher runs by the `if not exist` lines: they stay as they were."""
+    text = launcher._cmd([r"C:\new\python.exe", r"C:\old\python.exe"], [260, 400]).decode()
+    lines = [line for line in text.splitlines() if line.startswith("if not exist")]
+    assert lines == [r'if not exist "C:\new\python.exe" goto next1', r'if not exist "C:\old\python.exe" goto next2']
+
+
+@pytest.mark.skipif(os.name != "nt", reason="only cmd.exe reads a batch file again after each command in it")
+@pytest.mark.parametrize("written_by", ["an older Praxis", "this Praxis"])
+def test_a_command_running_through_the_launcher_keeps_its_exit_code_when_the_launcher_is_rewritten(
+    home, tmp_path, monkeypatch, written_by
+):
+    install = tmp_path / "an install"
+    (install / "agent_praxis").mkdir(parents=True)
+    (install / "agent_praxis" / "__init__.py").write_text("")
+    started, gate = tmp_path / "started", tmp_path / "go"
+    (install / "agent_praxis" / "__main__.py").write_text(  # a Praxis command that takes a while, then ends with 5
+        "import os, sys, time\n"
+        f"open({str(started)!r}, 'w').close()\n"
+        f"while not os.path.exists({str(gate)!r}):\n    time.sleep(0.05)\n"
+        "sys.exit(5)\n"
+    )
+    file = _launcher_file(home)
+    file.parent.mkdir(parents=True)
+    if written_by == "this Praxis":
+        file.write_bytes(launcher._cmd([sys.executable]))
+    else:
+        file.write_bytes(_windows_launcher_of_an_older_praxis([sys.executable]))
+    env = child_env(PRAXIS_HOME=str(home))
+    env["PYTHONPATH"] = str(install) + os.pathsep + env["PYTHONPATH"]
+    running = subprocess.Popen([str(file), "run", "--heavy", "tests"], cwd=str(tmp_path), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.time() + 120
+        while time.time() < deadline and not started.exists():
+            time.sleep(0.05)
+        assert started.exists(), "the command never started"
+        newer = _fake_python(tmp_path / ("a newer install in a folder with a longer name " + "x" * 30), "NEWER")
+        _launcher_from(monkeypatch, newer, "99.0.0", "--switch")  # `praxis update` does this
+        assert launcher._same(launcher.runs_now(home), str(newer))
+    finally:
+        gate.write_text("go")
+    out = running.communicate(timeout=120)[0]
+    assert running.returncode == 5, out
+    assert "not recognized" not in out, out
 
 
 def test_version_numbers_compare_as_numbers():

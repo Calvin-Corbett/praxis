@@ -34,6 +34,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "mixed: runs this Praxis beside a really installed older one for minutes (tests/test_mixed_versions.py); leave it out with -m \"not mixed\"",
+]
 
 [tool.ruff]
 line-length = 120

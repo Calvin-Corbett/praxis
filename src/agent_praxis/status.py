@@ -224,7 +224,8 @@ def _older_lines(store) -> list[str]:
         out.append("  They carry on as usual, and so does every new command of those versions: this project's "
                    f"database (format {store.level}) can be used by every Praxis from format {store.usable_from} on.")
         out.append("  They do not use what a newer Praxis added to it, and a landing of theirs is checked on its own, "
-                   "never in one batch with a landing of this Praxis.")
+                   "never in one batch with a landing of this Praxis. To move the launcher to the newest Praxis: "
+                   "praxis update")
         out.append("")
     if lost:
         out.append(f"OLDER PRAXIS COMMANDS ARE STILL RUNNING HERE: {live.listed(lost)}.")
@@ -359,16 +360,31 @@ def _heavy_lines(ctx, now: float) -> list[str]:
         out = [f"HEAVY JOBS (at most {ctx.cfg.heavy_jobs} run at once; `praxis run --heavy <command>`)"]
     else:
         return []
-    running, waiting = heavy.in_order(jobs)  # a landing check's jobs first, then the others in the order they start
+    rule = heavy.rules(ctx.store, jobs)  # jobs of an older Praxis start by that Praxis's rule
+    running, waiting = heavy.in_order(jobs, rule)  # the waiting jobs in the order they really start
+    kept = heavy.fixed(waiting, rule)
+    older = [j for j in waiting if rule.get(j["id"]) == heavy.JOINED]
     for j in sorted(running, key=lambda j: not heavy.is_check(j)):
         who = f"{j['agent']} (landing check)" if heavy.is_check(j) else j["agent"]
         out.append(f"  - running: {who}, started {ago(j['started'], now)}: {j['command']}")
     for j in waiting:
-        who = f"{j['agent']} (landing check, goes first)" if heavy.is_check(j) else j["agent"]
+        who = j["agent"]
+        if j["id"] in kept:
+            who += " (an older Praxis: keeps the place it joined at)"
+        elif rule.get(j["id"]) == heavy.JOINED:
+            who += " (an older Praxis: starts when every job that joined before it has)"
+        elif heavy.is_check(j):
+            who += " (landing check, goes first)" if not older else " (landing check)"
         out.append(f"  - waiting: {who}, joined {ago(j['enqueued'], now)}: {j['command']}")
     if len(waiting) > 1:
         out.append("  (waiting jobs start from the top: a landing check's first, then an agent with nothing running "
                    "before one that has a job running)")
+    if kept:
+        out.append("  (a job of an older Praxis starts strictly in the order the jobs joined, so the jobs of this "
+                   "Praxis are put in order around it: before it those that joined before it, after it the rest)")
+    elif older:
+        out.append("  (jobs of three Praxis versions are waiting, and each version starts its jobs by its own rule: "
+                   "a job of the oldest one may start earlier than its place in this list)")
     return [*out, ""]
 
 

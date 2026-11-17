@@ -2,7 +2,8 @@
 
 conftest.py puts this folder on PYTHONPATH for every test, so every Python a test starts (directly, through a
 shell, through a check command, through praxis itself) loads this file first. It does nothing unless the process
-is `python -m agent_praxis ...`; then it ends the process at once when the current folder is not inside the folder
+is `python -m agent_praxis ...` (or Praxis starting itself again in the background, which names its own code
+instead: background._spawn); then it ends the process at once when the current folder is not inside the folder
 named by PRAXIS_TEST_AREA. conftest.py does the same for commands run inside the test process.
 """
 
@@ -14,7 +15,16 @@ EXIT_CODE = 97  # no praxis command ends with this code, so a test that sees it 
 
 
 def _is_praxis_command(args: list[str]) -> bool:
-    return any(a == "-m" and b == "agent_praxis" for a, b in itertools.pairwise(args))
+    if any(a == "-m" and b == "agent_praxis" for a, b in itertools.pairwise(args)):
+        return True
+    return any(a == "-c" and "from agent_praxis.cli import main" in b for a, b in itertools.pairwise(args))
+
+
+def _words(args: list[str]) -> str:
+    """The praxis command in *args*, as a person would type it."""
+    if "agent_praxis" in args:
+        return " ".join(args[args.index("agent_praxis") + 1 :])
+    return " ".join(args[args.index("-c") + 3 :])  # after the code and the folder it is told (background._spawn)
 
 
 def _inside(here: str, top: str) -> bool:
@@ -34,7 +44,7 @@ def _guard() -> None:
     if os.path.isdir(here) and _inside(here, area):
         return
     sys.stderr.write(
-        f"refused to run `praxis {' '.join(args[args.index('agent_praxis') + 1 :])}` in {here}: that is outside "
+        f"refused to run `praxis {_words(args)}` in {here}: that is outside "
         f"this test's temporary folder ({area}). Tests run praxis only in their own temporary projects.\n"
     )
     sys.stderr.flush()

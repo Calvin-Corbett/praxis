@@ -11,9 +11,9 @@ installing a new version, and registering it, takes nothing over while agents ar
 launcher file lists the other installs after the chosen one, newest first: when the chosen one is uninstalled, the
 next one that still exists runs.
 
-The launcher only chooses which Praxis to run. An older Praxis that finds a project's database from a newer one still
-refuses every command, and a newer Praxis leaves a project's database alone while commands of an older one are still
-running in it (store.py), so the launcher cannot make versions mix.
+The launcher only chooses which Praxis to run. Two versions can work in one project at the same time (store.py says
+how), so switching it takes nothing from the commands already running. `praxis update` (update.py) is the command
+for a person: it registers the new install, looks at the projects first, and switches when nothing would be refused.
 """
 
 from __future__ import annotations
@@ -56,11 +56,14 @@ def _load(path: Path) -> list[dict]:
     )
 
 
-def _write_atomic(path: Path, text: str, executable: bool = False, newline: str = "\n") -> None:
+def _write_atomic(path: Path, text: str | bytes, executable: bool = False, newline: str = "\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
-    with open(temp, "w", encoding="utf-8", newline=newline) as handle:
-        handle.write(text)
+    if isinstance(text, bytes):
+        temp.write_bytes(text)
+    else:
+        with open(temp, "w", encoding="utf-8", newline=newline) as handle:
+            handle.write(text)
     if executable:
         temp.chmod(0o755)
     os.replace(temp, path)
@@ -136,20 +139,57 @@ def _sh(pythons: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _cmd(pythons: list[str]) -> str:
-    lines = ["@echo off", f"rem {ABOUT}"]
+# cmd.exe does not keep a batch file in memory. It runs one line, and when that command has ended it opens the file
+# again and reads on from the byte where it stopped. A launcher that is rewritten while a Praxis command runs through
+# it (a landing's check calling `praxis run --heavy`, at the moment of `praxis update`) therefore reads on in the
+# middle of some line of the NEW file: "'-m' is not recognized", exit code 9009, and the landing's check has failed.
+#
+# So the line that runs Praxis also holds what comes after it: end with that command's exit code. cmd.exe has read
+# the whole line before it runs Praxis and never reads the file again. (`call exit /b %%errorlevel%%`, because a plain
+# `%errorlevel%` on that line would be filled in before Praxis ran, and a bare `exit /b` ends a launcher that was
+# started directly with exit code 0 whatever Praxis returned: tried, on Windows 11.) Launchers written before this
+# had `exit /b %errorlevel%` on a line of its own. For the ones of those that are running right now, the new file
+# gets that very line at each byte where one of them will read on (see _read_on_at), with filler lines in front of
+# it that are never run.
+_EXIT = b"exit /b %errorlevel%"
+
+
+def _read_on_at(old: bytes) -> list[int]:
+    """The bytes of the launcher file *old* at which a cmd.exe that is running it now may read on: wherever a line
+    that is exactly `exit /b %errorlevel%` starts. In a launcher from before the one-line shape that is the line
+    after the one that runs Praxis; in a newer one it is a line this function's last caller put there, to be kept."""
+    found, at = [], 0
+    for line in old.splitlines(keepends=True):
+        if line.strip() == _EXIT:
+            found.append(at)
+        at += len(line)
+    return found
+
+
+def _cmd(pythons: list[str], read_on_at: list[int] | tuple = ()) -> bytes:
+    """The Windows launcher. *read_on_at*: see _read_on_at."""
+    out = f"@echo off\r\nrem {ABOUT}\r\n".encode()
+    if read_on_at:
+        out += b"goto run\r\n"
+        for at in sorted(read_on_at):
+            room = at - len(out)
+            if room == 2:
+                out += b"\r\n"
+            elif room >= 3:
+                out += b":" + b"-" * (room - 3) + b"\r\n"  # a label nobody jumps to: filler up to that byte
+            elif room != 0:
+                continue  # no line fits in front of it
+            out += _EXIT + b"\r\n"
+        out += b":run\r\n"
+    lines = []
     for n, py in enumerate(pythons, 1):
-        lines += [
-            f'if not exist "{py}" goto next{n}',
-            f'"{py}" -m agent_praxis %*',
-            "exit /b %errorlevel%",
-            f":next{n}",
-        ]
+        runs = f'"{py}" -m agent_praxis %* & call exit /b %%errorlevel%%'
+        lines += [f'if not exist "{py}" goto next{n}', runs, f":next{n}"]
     lines += [
         "echo Praxis: no installed version was found. Install Praxis again, then run: praxis launcher 1>&2",
         "exit /b 1",
     ]
-    return "\r\n".join(lines) + "\r\n"
+    return out + ("\r\n".join(lines) + "\r\n").encode()
 
 
 def _named(install: dict) -> str:
@@ -178,7 +218,11 @@ def write_launcher(say, home: Path | None = None, switch: bool = False) -> list[
     _write_atomic(written[0], _sh(pythons), executable=True)
     if os.name == "nt":  # praxis.cmd for cmd and PowerShell; the extensionless one for Git Bash
         written.append(bin_dir / "praxis.cmd")
-        _write_atomic(written[1], _cmd(pythons), newline="")
+        try:
+            running = _read_on_at(written[1].read_bytes())
+        except OSError:
+            running = []
+        _write_atomic(written[1], _cmd(pythons, running))
     say(f"The launcher is at {written[-1] if os.name == 'nt' else written[0]}")
     count = f"{len(installs)} installed version{'s' if len(installs) != 1 else ''} it knows about"
     if before and not _same(before, chosen["python"]):
@@ -191,15 +235,16 @@ def write_launcher(say, home: Path | None = None, switch: bool = False) -> list[
         say(f"The newest of the {count} is {_named(newest)}. To make the launcher run the newest:")
         say("  " + (f'"{program}"' if " " in program else program) + " -m agent_praxis launcher --switch")
         say(
-            "Switch when you choose to. Commands that are already running keep the Praxis they started with, and a "
-            "newer Praxis leaves a project's database as it is until the older commands in that project have finished."
+            "Switch when you choose to. Commands that are already running keep the Praxis they started with, and "
+            "both versions can work in one project at the same time."
         )
     say(
         "Put the launcher's folder on your PATH, or use its full path in your agents' instructions, and it keeps "
         "working when Praxis is updated."
     )
     say(
-        "After installing a new Praxis version, run `praxis launcher` once with it (that only registers it), then "
-        "`praxis launcher --switch` when the launcher should run it."
+        "After installing a new Praxis version, run `praxis update` once with it: it registers the new version, "
+        "looks at your projects, and makes the launcher run it when no command at work would be refused. (`praxis "
+        "launcher` only registers a version, and `praxis launcher --switch` switches without looking.)"
     )
     return written

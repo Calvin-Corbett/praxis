@@ -210,6 +210,7 @@ def test_status_lists_running_and_waiting_jobs_with_agent_and_age(project):
         for agent, started in (("alice", time.time() - 7200), ("bob", None)):
             token = uuid.uuid4().hex
             handle = open(store.dir / "heavy" / f"{token}.lock", "a+b")  # noqa: SIM115 - held open on purpose: the lock lives as long as the handle
+            store.stamp(handle, order=heavy.PLACED)  # a job of this Praxis says so in its file
             assert _try_lock(handle)
             handles.append(handle)
             with store.write() as db:

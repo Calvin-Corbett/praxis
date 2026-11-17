@@ -20,6 +20,23 @@
   output an agent put into its own folder by hand fails in it. `praxis check <agent>` runs your check in a folder
   made the same way, so it tells you beforehand. The README ("Checking in the line's own folder") lists every way
   the two can differ. No change to the database.
+- **`praxis update`: one command to move to a new Praxis version while agents work.** After installing a new
+  version, run `praxis update` with it. It registers the version with the launcher, looks at every project Praxis
+  is used in, tells you for each one what the new version will do to its database, and points the launcher at the
+  new version when that is safe everywhere: when it only adds to the databases (the usual case, and then the older
+  commands carry on beside it), or when no command of an older Praxis is running where it must change more. If
+  commands of an older Praxis have to finish first, it names them, changes nothing and exits with code 1;
+  `praxis update --when-safe` waits for them in the foreground and switches the moment they have finished. Praxis
+  now leaves one small file with the project's path in `~/.praxis/projects/` when a command runs in a project, so
+  that `praxis update` knows where to look. `praxis launcher` and `praxis launcher --switch` work as before.
+- **A test that proves an update under load.** `tests/test_mixed_versions.py` installs the last released Praxis
+  (built from this project's git history) and the new code side by side, puts the older one's landings and heavy
+  jobs in flight in a real project (foreground and background, running and waiting), switches to the new code with
+  `praxis update` in the middle, lets both versions start more work, and passes only if every heavy job ends with
+  its own exit code, every landing of both versions lands, no more heavy jobs ever ran at once than `heavy_jobs`
+  allows, and no command printed a refusal. It takes minutes: `pytest -m "not mixed"` leaves it out, and it skips
+  itself in a copy of the project without git history. If you change Praxis, the top of that file says how to move
+  its baseline at each release.
 - **Your check can test only what a landing changes.** For every landing's check Praxis now sets `PRAXIS_BASE` (the
   commit of the main version your work was put on top of) and `PRAXIS_CHANGED_FILES` (the path of a text file
   listing the files the landing changes, one per line, from the top of the project). Your check command can read
@@ -223,6 +240,22 @@
   today keeps working after a newer one has opened your project. A Praxis older than your project's "usable from"
   still refuses it ("This project was used by a newer Praxis"): that is built into the released versions and
   cannot be changed in them.
+- **On Windows, switching the launcher no longer breaks a command that is running through it.** `cmd.exe` does
+  not keep a batch file in memory: when a command in it ends, it opens the file again and reads on from the byte it
+  had reached. So when the launcher (`praxis.cmd`) was rewritten while a Praxis command was running through it, for
+  example a landing's check in the middle of `praxis run --heavy` at the moment you switched versions, that command
+  ended with "'-m' is not recognized as an internal or external command" and exit code 9009, and the landing failed
+  with "the check failed". The launcher now runs Praxis and passes its exit code on in one line, so `cmd.exe` never
+  reads the file again once Praxis runs. And when Praxis rewrites a launcher an older version made, it puts the
+  line those running commands will read on at exactly where they will look for it, so they too end with their own
+  exit code. The mixed-version test found this.
+- **Heavy jobs of two Praxis versions in one line start in the order `praxis status` shows.** A Praxis before
+  format 6 starts its waiting jobs strictly in the order they joined, and a newer one put a landing check's job
+  (and an agent with nothing running) in front. With both in one line, the newer job did not go in front: the two
+  only raced for the next free place, the message "it goes ahead of the waiting jobs" was not true, and status
+  listed an order the jobs did not start in. Now a job of this Praxis never starts before an older job that joined
+  first, status lists the line in the order the jobs really start (an older job is marked, and keeps the place it
+  joined at), and a landing check's job that waits behind an older job says how many of them start first.
 - **No Praxis version takes a landing of another version into its batch.** A newer landing at the head of the line
   already left older landings alone. Now an older head leaves newer landings alone too: before, its one check for
   the batch could fail for a reason of its own version, and every newer landing in the batch was told its work
