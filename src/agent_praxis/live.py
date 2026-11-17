@@ -1,4 +1,4 @@
-"""Who is running Praxis in a project right now, so a newer Praxis never takes the project over under older ones.
+"""Who is running Praxis in a project right now, so a newer Praxis never takes from older ones what they need.
 
 Every Praxis command that opens a project's database keeps one small file in `<git folder>/praxis/procs/` locked with
 the operating system's file lock for as long as it runs (the trick the landing line and the heavy jobs use). When the
@@ -18,6 +18,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 if os.name == "nt":
     import msvcrt
@@ -212,6 +213,15 @@ def _unstamped(state_dir: Path, db, table: str) -> tuple[list, int]:
 
 
 LAND, HEAVY, OTHER = "land", "heavy", "other"  # what an older command is, for the code that decides by it
+PRE_REGISTER = 4  # the newest database format a Praxis from before the register knows
+
+
+class Older(NamedTuple):
+    """A live command of an older Praxis."""
+
+    kind: str  # LAND, HEAVY or OTHER
+    words: str  # a few words for a person: what it is, and its process number when known
+    format: int  # the database format its Praxis knows (PRE_REGISTER at most, for one from before the register)
 
 
 def _kind(command: str) -> str:
@@ -222,9 +232,8 @@ def _kind(command: str) -> str:
     return HEAVY if words[:1] == ["run"] else OTHER
 
 
-def older(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[tuple[str, str]]:
-    """The live Praxis commands in this project whose Praxis knows a database format older than *fmt*, each as
-    (LAND, HEAVY or OTHER, a few words for a person: what, and the process number when known).
+def older(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[Older]:
+    """The live Praxis commands in this project whose Praxis knows a database format older than *fmt*.
 
     *db* is the open database (any format). Commands that registered say their format themselves. A Praxis from before
     the register is found by what it does keep locked: its place in the landing line and its heavy jobs.
@@ -235,13 +244,15 @@ def older(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[tuple
             words = _short(facts.get("command") or "a Praxis command")
             about = [f"pid {facts['pid']}"] if isinstance(facts.get("pid"), int) else []
             about += [f"Praxis {facts['version']}"] if isinstance(facts.get("version"), str) else []
-            found.append((_kind(facts.get("command") or ""), words + (f" ({', '.join(about)})" if about else "")))
+            words += f" ({', '.join(about)})" if about else ""
+            found.append(Older(_kind(facts.get("command") or ""), words, _number(facts.get("format"))))
     tables = _tables(db)
     starting = 0
     if "queue" in tables:
         rows, n = _unstamped(state_dir, db, "queue")
         starting += n
-        found += [(LAND, f"praxis land {row['agent']} (an older Praxis, pid not known)") for row in rows]
+        found += [Older(LAND, f"praxis land {row['agent']} (an older Praxis, pid not known)", PRE_REGISTER)
+                  for row in rows]
     if "heavy" in tables:
         rows, n = _unstamped(state_dir, db, "heavy")
         starting += n
@@ -249,15 +260,17 @@ def older(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[tuple
             about = ["an older Praxis"]
             about += [f"by {row['agent']}"] if row["agent"] and row["agent"] != "(nobody)" else []
             about += [f"its job is pid {row['pid']}"] if row["pid"] else []
-            found.append((HEAVY, f"{_short('praxis run --heavy ' + row['command'])} ({', '.join(about)})"))
+            words = f"{_short('praxis run --heavy ' + row['command'])} ({', '.join(about)})"
+            found.append(Older(HEAVY, words, PRE_REGISTER))
     if starting:
-        found.append((OTHER, f"{starting} landing or heavy job of an older Praxis that is just starting"))
+        words = f"{starting} landing or heavy job of an older Praxis that is just starting"
+        found.append(Older(OTHER, words, PRE_REGISTER))
     return found
 
 
 def older_commands(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[str]:
-    """older(), as the words alone. Empty when a newer Praxis may take over."""
-    return [words for _kind, words in older(state_dir, db, fmt, skip)]
+    """older(), as the words alone."""
+    return [found.words for found in older(state_dir, db, fmt, skip)]
 
 
 def listed(commands: list[str]) -> str:
@@ -268,22 +281,22 @@ def listed(commands: list[str]) -> str:
 
 def refusal(commands: list[str]) -> str:
     return (
-        f"Older Praxis commands are still running in this project ({listed(commands)}). This newer Praxis will take "
-        "over when they finish. Nothing was changed. (To take over now instead, run the same command with "
-        "--upgrade-now: it goes ahead when all that is left of the older Praxis are heavy jobs, and those finish "
-        "normally.)"
+        f"Older Praxis commands are still running in this project ({listed(commands)}), and this newer Praxis "
+        "changes the project's database in a way they cannot use. It will take over when they finish. Nothing was "
+        "changed. (To take over now instead, run the same command with --upgrade-now: it goes ahead when all that "
+        "is left of the older Praxis are heavy jobs, and those finish normally.)"
     )
 
 
-def no_takeover(found: list[tuple[str, str]]) -> str | None:
-    """Why --upgrade-now must not take the project over under the older commands *found* (see older), or None when it
+def no_takeover(found: list[Older]) -> str | None:
+    """Why --upgrade-now must not take a breaking step under the older commands *found* (see older), or None when it
     may: when all that is left of the older Praxis are heavy jobs, which run to their end whatever the database's
     format.
 
     A landing is different. Its check starts `praxis` commands with the older Praxis, the newer database refuses
     them, the check fails, and every agent in that landing's batch is told its work failed."""
-    landings = [words for kind, words in found if kind == LAND]
-    others = [words for kind, words in found if kind == OTHER]
+    landings = [one.words for one in found if one.kind == LAND]
+    others = [one.words for one in found if one.kind == OTHER]
     if not landings and not others:
         return None
     parts = []

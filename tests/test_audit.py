@@ -160,7 +160,7 @@ def test_a_database_from_before_named_checks_is_upgraded_and_gets_their_tables(t
     db.close()
     store = Store(tmp_path)
     try:
-        assert store.row("PRAGMA user_version")[0] == store_module.FORMAT
+        assert store.format == store.level == store_module.FORMAT
         assert store.has("checkpasses") and store.has("checktrust")
         assert store.rows("SELECT * FROM checkpasses") == [] and checkaudit.broken(store) == []
     finally:

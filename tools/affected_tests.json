@@ -52,6 +52,7 @@
   "tests/test_done_and_stale.py": ["tests/test_done_and_stale.py"],
   "tests/test_early.py": ["tests/test_early.py"],
   "tests/test_enough.py": ["tests/test_enough.py"],
+  "tests/test_formats.py": ["tests/test_formats.py"],
   "tests/test_fullcheck.py": ["tests/test_fullcheck.py"],
   "tests/test_heavy.py": ["tests/test_heavy.py"],
   "tests/test_heavy_line.py": ["tests/test_heavy_line.py"],
@@ -73,5 +74,5 @@
   "tests/test_tests_stand_alone.py": ["tests/test_tests_stand_alone.py"],
   "tests/test_treecpu.py": ["tests/test_treecpu.py"]
  },
- "untraced": ["tests/test_audit.py", "tests/test_check_command.py", "tests/test_inputs.py", "tests/test_stopped_landing.py"]
+ "untraced": ["tests/test_audit.py", "tests/test_check_command.py", "tests/test_formats.py", "tests/test_inputs.py", "tests/test_stopped_landing.py"]
 }

@@ -67,11 +67,11 @@ its full path in your agents' instructions and leave it.
 **The launcher never switches by itself.** After you install a new version, run `praxis launcher` once with it. That
 only registers the new install: the launcher keeps running the version it ran before, and the command tells you
 which version the launcher runs now, which is the newest, and the exact command that switches. When you choose to
-switch (best when no agent is in the middle of a landing or a heavy job), run that command:
+switch (any time: agents in the middle of a landing or a heavy job carry on), run that command:
 `praxis launcher --switch` with the new version. It points the launcher at the newest installed Praxis; among
 installs of the same version, the one you ran it from wins. If the version the launcher runs is uninstalled, the
-launcher runs the newest one that is left. The launcher only chooses which Praxis runs; see "Several versions of
-Praxis" for what keeps two versions from mixing inside one project.
+launcher runs the newest one that is left. The launcher only chooses which Praxis runs; see "Updating Praxis
+while agents work" for what happens in a project while two versions are at work in it.
 
 ---
 
@@ -622,54 +622,106 @@ the main folder; they apply to every agent folder).
 **Git hooks.** Every git command Praxis runs inside an agent's folder (and the check) has `PRAXIS_AGENT` and
 `PRAXIS_TASK` set, so a project's git hooks can tell an agent's commit, and which agent, from a person's.
 
+### Updating Praxis while agents work
+
+You can install a newer Praxis and use it while agents are landing and heavy jobs are running. Nothing has to
+stop first, and nothing is refused:
+
+- **What the older Praxis is doing carries on.** A landing, a background landing, a heavy job that is running or
+  waiting: each runs to its end with the Praxis it started with and ends with its own result. Commands the older
+  Praxis starts afterwards work too: a check that calls `praxis run --heavy` by the old version's path, or an agent
+  whose instructions still name the old version.
+- **The newer Praxis works at once.** Its first command in a project adds what it needs to the project's database
+  (new tables, new columns) and takes nothing away. It does not wait for the older commands, and they do not notice.
+- **The versions do not check each other's work.** A landing takes into its batch only landings of its own
+  version. A landing of another version, older or newer, lands on its own turn, in line order.
+- **`praxis status` tells you while both are at work.** Its top lines name every command of an older Praxis that
+  is still running:
+
+  ```
+  OLDER PRAXIS VERSIONS ARE AT WORK HERE: praxis land alice (pid 4242, Praxis 0.4.0); ...
+    They carry on as usual, and so does every new command of those versions: this project's database (format 8)
+    can be used by every Praxis from format 6 on.
+  ```
+
+What an older Praxis does not get is what the newer one added: it does not use the newer tables (the passes
+remembered per named check, for one), so its landings run their checks as that version always did.
+
+**Leave new settings for later.** Every Praxis refuses a `praxis.toml` that has a setting it does not know (it
+could be a typing mistake). So while an older Praxis is still in use in a project, do not add settings to its
+`praxis.toml` that only the newer one knows. `praxis init` of a newer Praxis writes all of its settings: a project
+set up with it is for that Praxis and newer ones.
+
+**Which older versions this covers.** A project's database says which Praxis can still use it: "usable from
+format N" in the status lines above. A project started with this Praxis is usable from format 6. A project that
+an older Praxis started keeps the number it has, so the Praxis that made it keeps working in it. A Praxis older
+than that number refuses every command ("This project was used by a newer Praxis") and changes nothing: that
+refusal is built into the versions already released and cannot be taken out of them, so update that Praxis.
+
+To move your agents to the new version, install it and point the launcher at it (see "One path that survives
+updates" under Install). Do it whenever you like: no agent has to be idle.
+
 ### Several versions of Praxis
 
-Praxis keeps a format number in its database (`.git/praxis/praxis.db`). A newer Praxis brings an older
-database up to date by itself, in one step that cannot be left half-done. An older Praxis that finds a database
-from a newer one refuses every command ("this project was used by a newer Praxis") instead of guessing, so
-several Praxis versions can be installed side by side safely.
+This is how the section above is kept true. A project's database (`.git/praxis/praxis.db`) carries two numbers:
 
-**A newer Praxis never takes a project over while older commands are still running in it.** A landing or a heavy
-job can run for hours, and it checked the database's format when it started. So before a newer Praxis brings a
-project's database up to date, it looks for commands of an older Praxis that are still running there:
+- its **format**: which steps it has had, so which tables and columns it holds;
+- **usable from**: the oldest format whose Praxis can still use it safely.
+
+Every change to the database is a numbered step, and every step is one of two kinds. An **additive** step adds a
+table, or a column that has a default. A Praxis that does not know about it carries on unharmed, so the step is
+taken at once, whoever is running, and "usable from" stays where it is. Every step since format 5 has been of this
+kind. A **breaking** step is anything else: a Praxis from before it cannot use the database afterwards, and the
+step raises "usable from" to its own number.
+
+A Praxis works in every project whose "usable from" is not above the format it knows itself, using only what it
+knows; what a newer Praxis added it leaves alone. The versions released before these two numbers know one number
+only, and refuse a database where it is above their own format. That number is the one "usable from" is kept in,
+which is why they keep working in a database a newer Praxis has added to.
+
+**A breaking step is never taken while older commands are still running.** A landing or a heavy job can run for
+hours. So before a newer Praxis takes a breaking step, it looks for commands of a Praxis older than that step that
+are still running in the project:
 
 - Every Praxis command keeps a small locked file in `.git/praxis/procs/` while it runs, saying its process number,
   the database format it knows, its version and the command. The operating system frees the lock when the process
-  ends, however it ends, so a command that crashed is never counted as running.
+  ends, however it ends, so a command that crashed is never counted as running. A command that was killed leaves
+  its file behind; the next `praxis status` removes it.
 - A Praxis from before this register is found by what it does keep locked: its place in the landing line and its
   heavy jobs.
 
-While any of them is running, the newer Praxis leaves the database as it is. `praxis status` still shows the
-project (with a line at the top naming the older commands), and commands that only use what the older database
-already has (`claim`, `start`, `done`, `blocked` and so on) work as usual. A command that needs the new format
+While any of them is running, the newer Praxis leaves the database without that step. `praxis status` still shows
+the project (with a line at the top naming the older commands), and commands that only use what the database
+already has (`claim`, `start`, `done`, `blocked` and so on) work as usual. A command that needs the step
 (`praxis land`, for one) changes nothing, exits with code 1 and says:
 
 ```
-Older Praxis commands are still running in this project (praxis land alice (pid 4242, Praxis 0.4.0); ...).
-This newer Praxis will take over when they finish. Nothing was changed.
+Older Praxis commands are still running in this project (praxis land alice (pid 4242, Praxis 0.4.0); ...), and
+this newer Praxis changes the project's database in a way they cannot use. It will take over when they finish.
+Nothing was changed.
 ```
 
-Run it again when they have finished; the first command after that brings the database up to date.
+Run it again when they have finished; the first command after that takes the step.
 
-To take over at once, add `--upgrade-now` to any command (for example `praxis status --upgrade-now`). What it does
-depends on what the older Praxis is still running:
+To take a breaking step at once, add `--upgrade-now` to any command (for example `praxis status --upgrade-now`).
+What it does depends on what the older Praxis is still running:
 
 - **Only heavy jobs:** it takes over. A heavy job that is running or waiting carries on and ends with its own exit
   code.
 - **A landing (`praxis land`), or any other command:** it refuses, exits with code 1 and changes nothing. The check
-  of an older landing starts `praxis` commands with the older Praxis, the newer database would refuse them, the
-  check would fail, and every agent in that landing's batch would be told its work failed. The message names the
+  of an older landing starts `praxis` commands with the older Praxis, the database would refuse them, the check
+  would fail, and every agent in that landing's batch would be told its work failed. The message names the
   landings: wait for them, or stop them and land them again with the newer Praxis afterwards. If you want to take
   over regardless, add `--even-with-older-landings` as well; the work of a landing that then fails is kept, and you
   land it again.
 
-For as long as a command of the older Praxis is still running, `praxis status` names it at the top and says what
-it can still do, also after the newer Praxis has taken over. A command that was killed leaves its small file in
-`.git/praxis/procs/` behind; the next command that looks at the register removes it.
+After such a takeover `praxis status` keeps naming the older commands that are still running, and says what they
+can still do, until the last one has ended.
 
-A landing with a newer Praxis also never takes a landing of an older Praxis into its batch (see "Batched
-landings"): each `praxis land` writes into its place in the line which batch messages it understands, and one that
-says nothing, or less than the batch needs, lands on its own turn.
+No Praxis version takes a landing of another version into its batch (see "Batched landings"). Each `praxis land`
+writes into its place in the line which batch messages it understands, and a head of the line takes only places
+that say what it says itself. A Praxis from before that rule cannot be changed any more, so a newer `praxis land`
+also marks its place in a way that Praxis has always left alone.
 
 ---
 
@@ -738,12 +790,15 @@ so Praxis leaves it alone. Pick another name, or add `--reuse-branch` to carry o
 (this is also how to pick up work `praxis abandon` saved).
 
 **"This project was used by a newer Praxis"**
-A newer Praxis has used this project, and this one does not know its database format. Update Praxis, or use the
-newer one for this project.
+A newer Praxis has changed this project's database in a way this older one cannot use, or this Praxis is one of
+the versions that refuse every database a newer Praxis has made. Nothing was changed. Update Praxis, or use the
+newer one for this project. See "Updating Praxis while agents work".
 
 **"Older Praxis commands are still running in this project"**
-You ran a newer Praxis while commands of an older one (the message lists them) are still at work in the project.
-The newer Praxis changed nothing and takes over when they finish: run your command again then. If a listed command
+You ran a newer Praxis that must change the project's database in a way an older one cannot use, while commands
+of an older one (the message lists them) are still at work in the project. That is rare: most updates only add to
+the database and wait for nobody. The newer Praxis changed nothing and takes over when they finish: run your
+command again then. If a listed command
 is stuck or no longer wanted, stop it; if you must take over right now, add `--upgrade-now` to your command (it
 goes ahead when only heavy jobs of the older Praxis are left). See "Several versions of Praxis".
 

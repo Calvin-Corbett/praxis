@@ -4,8 +4,12 @@ It lives in `<git folder>/praxis/praxis.db`, so every worktree sees the same cla
 none of it is ever committed. Writes take SQLite's write lock up front (BEGIN IMMEDIATE), so two agents
 claiming the same file at the same moment cannot both win.
 
-Every Store registers its process as at work in the project (live.py) before it reads the database, and a database is
-never brought up to a newer format while commands of an older Praxis are still running in the project.
+Every Store registers its process as at work in the project (live.py) before it reads the database.
+
+Several Praxis versions can work in one project at the same time, because a database says two things about itself
+(see FORMAT below): what it holds, and the oldest Praxis that can still use it. A step that only adds to the database
+is taken at once and leaves every older Praxis working. Only a step an older Praxis cannot live with waits until no
+command of such a Praxis is running in the project any more.
 """
 
 from __future__ import annotations
@@ -20,9 +24,38 @@ from pathlib import Path
 from agent_praxis import __version__, live
 from agent_praxis.errors import PraxisError
 
-# The database's format number (kept in SQLite's user_version). Raise it whenever the tables change, and add the
-# step that brings an older database up to it to UPGRADES. A database from before format numbers reads as 0.
-FORMAT = 7
+# Two numbers describe a project's database.
+#
+# Its FORMAT says which of the steps below it has had, so which tables and columns it holds. It is kept in the `meta`
+# table, where no Praxis from before that table looks.
+#
+# Its "usable from" number is the oldest format whose Praxis can still use it safely. It is kept in SQLite's
+# user_version. Every Praxis released before the `meta` table (format 6 and older) knows only that number: it takes
+# it for the database's format and refuses a database where it is higher than the format it knows. That can never be
+# changed in them. So user_version is raised only by a BREAKING step and stays where it is through every ADDITIVE
+# one, and such an older Praxis, whether it is running already or started afterwards, keeps working in a database
+# that a newer Praxis has added to. A Praxis that knows `meta` goes by the same rule: it works in every database
+# whose "usable from" is not above its own FORMAT, using only what it knows.
+#
+# To change the tables: raise FORMAT, add the step to UPGRADES, and say in KIND which kind it is.
+FORMAT = 8
+USABLE_FROM = 6  # what a brand-new database starts at: the newest format a released Praxis from before `meta` knows
+META = 8  # the step that brought the `meta` table: a database below it keeps its format in user_version alone
+
+# ADDITIVE: the step only adds a table, or a column that has a default, so the code of every older format (from the
+# database's "usable from" on) keeps working without knowing about it. It is taken at once, whoever is running.
+# BREAKING: anything else. An older Praxis cannot use the database afterwards, so the step waits until no command of
+# such a Praxis is running in the project (_upgrade), and it raises "usable from" to its own number.
+ADDITIVE, BREAKING = "additive", "breaking"
+KIND = {
+    2: BREAKING,  # 2 to 4 are from before the two numbers. Nobody has run a Praxis that old beside a newer one,
+    3: BREAKING,  # so they are treated as they always were: taken only when no older command is running.
+    4: BREAKING,
+    5: ADDITIVE,  # a new table (fullchecks)
+    6: ADDITIVE,  # a new column with a default (heavy.priority)
+    7: ADDITIVE,  # two new tables (checkpasses, checktrust)
+    8: ADDITIVE,  # a new table (meta)
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -156,6 +189,13 @@ CREATE TABLE IF NOT EXISTS checktrust (
     broken_agent TEXT
 );
 """,
+    # Where a database says what it holds (see FORMAT): one row, key 'format'.
+    8: """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+""",
 }
 
 
@@ -170,6 +210,30 @@ def _apply(db, statement: str) -> None:
     except sqlite3.OperationalError as exc:
         if "duplicate column name" not in str(exc):
             raise
+
+
+def usable_from(user_version: int) -> int:
+    """The "usable from" number a database's user_version stands for. Any number up to USABLE_FROM is one (a Praxis
+    from before `meta` wrote its format there), and so is the number of a breaking step. Anything else was written by
+    a Praxis from before the two numbers for a step that is additive (7 was: it never left Praxis's own
+    development), and stands for the newest real one below it."""
+    real = [n for n in range(1, user_version + 1) if n <= USABLE_FROM or KIND.get(n) == BREAKING]
+    return max(real, default=0)
+
+
+def formats(db) -> tuple[int, int]:
+    """(the format of the database behind the connection *db*, its user_version)."""
+    version = int(db.execute("PRAGMA user_version").fetchone()[0])
+    try:
+        row = db.execute("SELECT value FROM meta WHERE key = 'format'").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        row = None  # from before `meta`: its user_version is its format
+    try:
+        return max(version, int(row[0])) if row else version, version
+    except (TypeError, ValueError):
+        return version, version
 
 
 def added_in(table: str) -> int:
@@ -187,8 +251,10 @@ class Store:
         while a landing (or anything else) of an older Praxis runs it refuses, unless *even_landings*."""
         self.dir = state_dir
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.format = 0  # the format the database is at, as far as this Store knows
-        self.older: list[str] = []  # live commands of an older Praxis this Store found when it wanted to upgrade
+        self.format = 0  # the newest format this Store may use: the database's own, or FORMAT when that is newer
+        self.level = 0  # the database's own format, which a newer Praxis may have taken past FORMAT
+        self.usable_from = 0  # the oldest format whose Praxis can use the database
+        self.older: list[str] = []  # live commands of an older Praxis that a breaking step met when it was due
         self.held_back = False  # True when the database was left at an older format because of them
         self.conn = None
         # Registered BEFORE the format is read: a newer Praxis that upgrades holds the whole database while it looks
@@ -197,66 +263,72 @@ class Store:
         try:
             self.conn = sqlite3.connect(str(self.dir / "praxis.db"), timeout=60, isolation_level=None)
             self.conn.row_factory = sqlite3.Row
-            self.format = self._format()
-            self._refuse_newer(self.format)
-            if self.format < FORMAT:
+            self.level, self.usable_from = self._retry(lambda: formats(self.conn))
+            self._refuse_newer(self.usable_from)
+            self.format = min(self.level, FORMAT)
+            if self.level < FORMAT or self.usable_from != usable_from(self.usable_from):
                 self._upgrade(upgrade_now, even_landings)
         except BaseException:
             self.close()
             raise
 
-    def _format(self) -> int:
-        return int(self._retry(lambda: self.conn.execute("PRAGMA user_version").fetchone()[0]))
-
     @staticmethod
-    def _refuse_newer(found: int) -> None:
-        if found > FORMAT:
+    def _refuse_newer(usable: int) -> None:
+        if usable > FORMAT:
             raise PraxisError(
-                f"This project was used by a newer Praxis (format {found}); this Praxis knows format {FORMAT} and "
-                "older. Update Praxis (or use the newer one) for this project. Nothing was changed."
+                f"This project was used by a newer Praxis (format {usable}), which changed the project's database "
+                f"in a way an older Praxis cannot use; this Praxis knows format {FORMAT} and older. Update Praxis (or "
+                "use the newer one) for this project. Nothing was changed."
             )
 
     def _upgrade(self, now: bool = False, even_landings: bool = False) -> None:
         """Bring a new or older database up to FORMAT, all in one transaction: another process upgrading at the same
         moment waits, then finds nothing left to do.
 
-        Not while commands of an older Praxis are still running in the project (unless *now*): they checked the
-        format when they started and would carry on in a database they do not know. Then the database is left as it
-        is, and `older` says who they are. The transaction holds the whole database (readers too), so no command can
-        read the old format while this one decides.
+        An additive step is taken at once: every Praxis that could use the database before still can, and its
+        user_version stays as it is. A breaking step is not taken while commands of a Praxis older than that step are
+        still running in the project (unless *now*): they would carry on in a database they cannot use. Then the
+        database is left at the step before it, and `older` says who they are. The transaction holds the whole
+        database (readers too), so no command can read the old numbers while this one decides.
 
-        Even with *now* it refuses, changing nothing, while a landing of an older Praxis runs (live.no_takeover says
-        why), unless *even_landings*.
+        Even with *now* a breaking step refuses, changing nothing, while a landing of such a Praxis runs
+        (live.no_takeover says why), unless *even_landings*.
         """
         with self.write(exclusive=True) as db:
-            found = int(db.execute("PRAGMA user_version").fetchone()[0])
-            self._refuse_newer(found)
-            self.format = found
-            if found >= FORMAT:
-                return
-            in_use = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'").fetchone()
-            if in_use:  # a brand-new database has nobody to take it from
-                running = live.older(self.dir, db, FORMAT, self._registration[0])
-                self.older = [words for _kind, words in running]
-                if self.older and not now:
-                    self.held_back = True
-                    return
-                refused = None if even_landings else live.no_takeover(running)
-                if refused:
-                    raise PraxisError(refused)
-            steps = [SCHEMA] + [UPGRADES[n] for n in range(max(found, 1) + 1, FORMAT + 1)]
-            for script in steps:
-                for statement in _statements(script):
+            level, version = formats(db)
+            self._refuse_newer(version)
+            usable = usable_from(version)
+            new = not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'").fetchone()
+            if new:  # a brand-new database has nobody to take it from
+                level, usable = 1, USABLE_FROM
+            reached = level
+            for statement in _statements(SCHEMA):
+                _apply(db, statement)
+            for step in range(max(level, 1) + 1, FORMAT + 1):
+                if KIND[step] == BREAKING:
+                    running = [] if new else live.older(self.dir, db, step, self._registration[0])
+                    if running:
+                        self.older = [found.words for found in running]
+                        if not now:
+                            self.held_back = True
+                            break
+                        refused = None if even_landings else live.no_takeover(running)
+                        if refused:
+                            raise PraxisError(refused)
+                    usable = max(usable, step)
+                for statement in _statements(UPGRADES[step]):
                     _apply(db, statement)
-            db.execute(f"PRAGMA user_version = {FORMAT}")
-            self.format = FORMAT
+                reached = step
+            if reached >= META:
+                db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('format', ?)", (str(max(reached, level)),))
+            if usable != version:
+                db.execute(f"PRAGMA user_version = {usable}")
+            self.level, self.usable_from = max(reached, level), usable
+            self.format = min(self.level, FORMAT)
 
-    def older_now(self) -> list[str]:
-        """The commands of an older Praxis that are running in the project at this moment (live.older_commands),
-        whether or not the database was brought up to this Praxis's format under them."""
-        if self.held_back:
-            return self.older
-        return live.older_commands(self.dir, self.conn, FORMAT, self._registration[0])
+    def older_now(self) -> list:
+        """The commands of an older Praxis that are running in the project at this moment (see live.older)."""
+        return live.older(self.dir, self.conn, FORMAT, self._registration[0])
 
     def stamp(self, handle, **more) -> None:
         """Write who holds a brand-new lock file (a landing-line ticket, a heavy job) into it, BEFORE it is locked. A
@@ -264,7 +336,8 @@ class Store:
         live.stamp(handle, pid=os.getpid(), format=FORMAT, version=__version__, **more)
 
     def has(self, table: str) -> bool:
-        """False only when *table* comes with a format the database was not brought up to (see _upgrade)."""
+        """False only when *table* comes with a step the database has not had: a breaking step that waits for
+        commands of an older Praxis to finish, or a step after it (see _upgrade)."""
         return self.format >= added_in(table)
 
     def need(self, tables=None) -> None:

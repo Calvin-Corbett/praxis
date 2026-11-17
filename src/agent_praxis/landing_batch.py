@@ -29,6 +29,8 @@ from agent_praxis.landing_queue import (
     PROTOCOL,
     clear_dead,
     clear_note,
+    free_note,
+    in_a_batch,
     read_note,
     ticket_alive,
     ticket_protocol,
@@ -190,7 +192,7 @@ def _settle(ctx: Ctx, marker: dict) -> None:
     for entry in marker.get("members", []):  # agents still waiting, who were never told: they carry on by themselves
         note = read_note(ctx.store, entry["token"]) if entry["agent"] != marker["agent"] else None
         if note and not note.get("done"):
-            clear_note(ctx.store, entry["token"])
+            free_note(ctx.store, entry["token"])
     folder = Path(marker["folder"])
     if not folder.exists() or gitops.current_branch(folder) == marker["branch"]:
         _drop_marker(ctx, marker["agent"])
@@ -270,10 +272,10 @@ def _followers(ctx: Ctx, row, ticket) -> list[Member]:
             break
         if q["agent"] == row["name"] or any(m.name == q["agent"] for m in found):
             continue
-        if not ticket_alive(ctx.store, q["token"]) or read_note(ctx.store, q["token"]) is not None:
+        if not ticket_alive(ctx.store, q["token"]) or in_a_batch(read_note(ctx.store, q["token"])):
             continue
-        if ticket_protocol(ctx.store, q["token"]) < PROTOCOL:
-            continue  # an older Praxis is landing it and would not understand the batch: it lands on its own turn
+        if ticket_protocol(ctx.store, q["token"]) != PROTOCOL:
+            continue  # another Praxis version is landing it: no version checks another's work, it lands on its own turn
         other = ctx.store.agent(q["agent"])
         if other is None or other["paused"]:
             continue
@@ -338,11 +340,11 @@ def try_batch(ctx: Ctx, row, folder: Path, ticket, finish: bool = False) -> bool
         run.process(members)
         for m in followers:
             if m.outcome is None:  # left out: it lands on its own turn
-                clear_note(ctx.store, m.token)
+                free_note(ctx.store, m.token)
     except Abort:
         for m in followers:
             if m.outcome is None:
-                clear_note(ctx.store, m.token)
+                free_note(ctx.store, m.token)
         run.close()
         return False if head.outcome is None else head.outcome == "landed"
     except (
@@ -493,7 +495,7 @@ class _Run:
     def _leave_out(self, m: Member) -> None:
         m.outcome = "left-out"
         if m is not self.head:
-            clear_note(self.ctx.store, m.token)
+            free_note(self.ctx.store, m.token)
 
     def _decide(self, m: Member, outcome: str, ok: bool, commit: str | None = None) -> None:
         """Record an agent's result; an agent behind the head is told through its note, and its process prints it."""

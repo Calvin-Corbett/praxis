@@ -42,19 +42,22 @@ When things go wrong:
   praxis launcher [--switch]                    register this Praxis with the stable per-user launcher; --switch
                                                 makes the launcher run the newest installed Praxis
 
-A newer Praxis does not take a project over while commands of an older Praxis are still running in it: it works with
-the project as it is where it can, or says who is still running and changes nothing. Add --upgrade-now to any command
-to take over at once: that goes ahead when only heavy jobs of the older Praxis are left (they finish normally), and
-refuses while one of its landings is still running (its check would fail), unless you add --even-with-older-landings.
+You can update Praxis while agents work. A newer Praxis only adds to a project's database, so commands of the older
+one (running, or started later) carry on beside it; `praxis status` names them. Only when a newer Praxis must change
+the database in a way an older one cannot use does it wait for the older commands to finish, working with the
+project as it is where it can. --upgrade-now takes that step at once when only heavy jobs of the older Praxis are
+left (they finish normally); it refuses while one of its landings is still running (its check would fail), unless you
+add --even-with-older-landings.
 
 Exit codes: 0 done, 1 refused (the message says why; nothing was changed), 2 not landed or a step failed (the
 message says why; work is kept), 3 Praxis hit a problem it did not expect, 130 stopped with Ctrl+C.
 """
 
 
-# The tables each command uses besides the first ones (agents, claims, landings, queue, removing). While commands of
-# an older Praxis are still running, the project's database is left at their format: a command listed here carries on
-# when the database has its tables, and every other command (it may use any table) waits for them to finish.
+# The tables each command uses besides the first ones (agents, claims, landings, queue, removing). While a breaking
+# step waits for commands of an older Praxis to finish (store.py), the project's database is left without that step
+# and those after it: a command listed here carries on when the database has its tables, and every other command (it
+# may use any table) waits for them to finish.
 USES = {
     "status": (),  # shows the heavy jobs and the check cache only when the database has them
     "claim": (),
@@ -74,8 +77,9 @@ USES = {
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="praxis", description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
-    upgrade_help = ("take this project over at once, even while heavy jobs of an older Praxis are still running in it "
-                    "(refused while a landing of an older Praxis is running)")
+    upgrade_help = ("when this Praxis must change the project's database in a way an older Praxis cannot use: do it "
+                    "at once, even while heavy jobs of an older Praxis are still running (refused while one of its "
+                    "landings is running)")
     even_help = "with --upgrade-now: take over even while a landing of an older Praxis is running (its check may fail)"
     p.add_argument("--upgrade-now", action="store_true", help=upgrade_help)
     p.add_argument("--even-with-older-landings", action="store_true", help=even_help)

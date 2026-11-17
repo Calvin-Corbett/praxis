@@ -21,9 +21,16 @@ from agent_praxis.live import unlock as _unlock
 from agent_praxis.store import Store
 
 # What this Praxis's `praxis land` understands of the landing line, written into its ticket file. Raise it when a
-# waiting lander must understand something new (1: the notes a batch's head writes). A ticket that says nothing is a
-# lander from before the number, and is never taken into a batch.
-PROTOCOL = 1
+# waiting lander must understand something new (1: the notes a batch's head writes; 2: a ticket starts with a note
+# of its own, see ALONE). A ticket that says nothing is a lander from before the number. A batch is made only of
+# landers that say the same number as its head: no Praxis version checks, or is checked by, another one.
+PROTOCOL = 2
+
+# The note every ticket of this Praxis starts with, and gets back when a batch lets it go. It names no batch and no
+# result, so no lander reads anything into it. It is there for the heads of the line that cannot be changed any
+# more: a Praxis from before PROTOCOL 2 takes no ticket into its batch that has a note of any kind (to it, a note
+# means "already in a batch"), so it leaves this one to land on its own turn.
+ALONE = {"alone": True}
 
 POLL_SECONDS = 0.3
 NOTE_HEARTBEAT_SECONDS = 60  # a waiting batch member says it is still waiting this often
@@ -64,6 +71,20 @@ def clear_note(store: Store, token: str) -> None:
         note_file(store, token).unlink()
     except OSError:
         pass
+
+
+def in_a_batch(note: dict | None) -> bool:
+    """True when *note* says its ticket was taken into a batch (or what became of it there). ALONE does not."""
+    return bool(note) and bool(note.get("members") or note.get("done"))
+
+
+def free_note(store: Store, token: str) -> None:
+    """The ticket is in no batch (any more): its lander carries on by itself. A lander of this Praxis gets its ALONE
+    note back, one of an older Praxis gets no note at all, as it expects."""
+    if ticket_alive(store, token) and ticket_protocol(store, token) >= 2:
+        write_note(store, token, dict(ALONE))
+    else:
+        clear_note(store, token)
 
 
 def clear_dead(store: Store) -> None:
@@ -145,6 +166,8 @@ class Ticket:
         self.store.stamp(self.handle, protocol=PROTOCOL)
         if not _try_lock(self.handle):
             raise RuntimeError("could not lock a brand-new queue file")
+        if read_note(self.store, self.token) is None:  # before the place in line exists: never seen without it
+            write_note(self.store, self.token, dict(ALONE))
         with self.store.write() as db:
             self.id = db.execute("INSERT INTO queue (agent, token, enqueued) VALUES (?, ?, ?)",
                                  (self.agent, self.token, time.time())).lastrowid

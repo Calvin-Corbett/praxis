@@ -1,11 +1,12 @@
-"""A newer Praxis never takes a project over while commands of an older Praxis are still running in it.
+"""A newer Praxis never takes a breaking step in a project while commands of an older Praxis are still running in it.
 
-The older commands here are fakes: the files a real one keeps (its line in the register, its landing-line ticket, its
+(The steps that only add to the database are taken at once: see test_formats.py.) The older commands here are fakes: the files a real one keeps (its line in the register, its landing-line ticket, its
 heavy-job lock file), with their locks held by the test for as long as the "command" is meant to be running.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -21,24 +22,43 @@ from conftest import edit, folder, git, praxis, praxis_process
 
 from agent_praxis import cli, config, gitops, landing_batch, live, store
 from agent_praxis.agents import Ctx
-from agent_praxis.landing_queue import PROTOCOL, Ticket, read_note, ticket_protocol
+from agent_praxis.landing_queue import (
+    ALONE,
+    PROTOCOL,
+    Ticket,
+    clear_note,
+    free_note,
+    read_note,
+    ticket_protocol,
+    write_note,
+)
 from agent_praxis.store import Store
 
-BEHIND = store.FORMAT - 1  # the format of "the Praxis before this one"
-# The tables the newest format brings: what the database of the Praxis before this one does not have.
-NEWEST = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", store.UPGRADES[store.FORMAT]))
+# The format of "the Praxis before this one" where it matters: the one before the newest breaking step.
+BEHIND = max(step for step, kind in store.KIND.items() if kind == store.BREAKING) - 1
+# The tables that step and the ones after it bring: what the database of that Praxis does not have.
+NEWEST = {
+    table
+    for step in range(BEHIND + 1, store.FORMAT + 1)
+    for table in re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", store.UPGRADES[step])
+}
 
 
 def state(project: Path) -> Path:
     return project / ".git" / "praxis"
 
 
-def db_format(project: Path) -> int:
+def numbers(project: Path) -> tuple[int, int]:
+    """(the database's format, its user_version: the oldest format whose Praxis can use it)."""
     conn = sqlite3.connect(state(project) / "praxis.db")
     try:
-        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        return store.formats(conn)
     finally:
         conn.close()
+
+
+def db_format(project: Path) -> int:
+    return numbers(project)[0]
 
 
 def tables(project: Path) -> set[str]:
@@ -226,7 +246,7 @@ def test_a_registered_older_command_keeps_the_database_as_it_is(alice):
         code, out = praxis("land", "alice")
         assert code == 1, out
         assert "Older Praxis commands are still running in this project (praxis land ghost (pid 4242" in out
-        assert "This newer Praxis will take over when they finish. Nothing was changed." in out
+        assert "in a way they cannot use. It will take over when they finish. Nothing was changed." in out
         assert "--upgrade-now" in out
         assert db_format(alice) == BEHIND
         assert git(alice, "log", "--format=%s", "main").count("alice") == 0, "nothing landed"
@@ -382,7 +402,8 @@ def test_status_keeps_naming_older_commands_after_the_takeover(alice):
             assert "OLDER PRAXIS COMMANDS ARE STILL RUNNING HERE" in out
             assert "praxis run --heavy pytest -q (pid 4242, Praxis 0.3.0)" in out
             assert "praxis run --heavy npm test (an older Praxis, by bob, its job is pid 777)" in out
-            assert "already at this newer Praxis's format" in out and "ends with its own exit code" in out
+            assert "changed in a way their Praxis cannot use" in out and "ends with its own exit code" in out
+            assert f"only Praxis from format {BEHIND + 1} on can use it now" in out
             assert "It takes over when they finish" not in out, "it has taken over already"
     finally:
         let_go(ghost)
@@ -527,26 +548,122 @@ def test_a_ticket_says_which_protocol_its_lander_understands(project):
         opened.close()
 
 
-def test_the_batch_head_takes_only_followers_that_understand_the_batch(project):
-    _saved_work(project, "alice")
-    _saved_work(project, "bob")
-    _saved_work(project, "carol")
-    _saved_work(project, "dave")
+def test_the_batch_head_takes_only_followers_of_its_own_praxis_version(project):
+    for name in ("alice", "bob", "carol", "dave", "erin", "frank"):
+        _saved_work(project, name)
     opened = Store(state(project))
     held = [
         older_landing(project, "bob"),  # from before the number
         older_landing(project, "carol", pid=1, format=store.FORMAT, version="x", protocol=PROTOCOL - 1),
         older_landing(project, "dave", pid=2, format=store.FORMAT, version="x", protocol=PROTOCOL),
+        older_landing(project, "erin", pid=3, format=store.FORMAT + 1, version="y", protocol=PROTOCOL + 1),  # a newer one
     ]
     try:
         ctx = _ctx(project, opened)
         head = types.SimpleNamespace(id=0)
-        members = landing_batch._followers(ctx, opened.agent("alice"), head)
-        assert [m.name for m in members] == ["dave"], "bob and carol land on their own turn"
+        assert [m.name for m in landing_batch._followers(ctx, opened.agent("alice"), head)] == ["dave"], (
+            "an older lander and a newer one each land on their own turn"
+        )
+        frank = older_landing(project, "frank", pid=4, format=store.FORMAT, version="x", protocol=PROTOCOL)
+        held.append(frank)
+        write_note(opened, frank[1], dict(ALONE))  # what a real ticket of this Praxis starts with
+        names = [m.name for m in landing_batch._followers(ctx, opened.agent("alice"), head)]
+        assert names == ["dave", "frank"], "the note a ticket starts with does not keep its own version's head away"
+        write_note(opened, frank[1], {"members": ["zed", "frank"]})
+        names = [m.name for m in landing_batch._followers(ctx, opened.agent("alice"), head)]
+        assert names == ["dave"], "a ticket another batch has taken is left alone"
     finally:
         for handle, _token in held:
             let_go(handle)
         opened.close()
+
+
+def test_a_ticket_starts_with_a_note_that_keeps_an_older_head_away_and_gets_it_back(project):
+    """A head from before PROTOCOL 2 takes no ticket that has a note. So every ticket of this Praxis has one from
+    its first moment, and has it again whenever a batch of its own version lets it go."""
+    opened = Store(state(project))
+    try:
+        with Ticket(opened, "alice", say=lambda _t: None) as ticket:
+            assert read_note(opened, ticket.token) == ALONE
+            write_note(opened, ticket.token, {"members": ["zed", "alice"]})  # a head of this Praxis took it ...
+            free_note(opened, ticket.token)  # ... and left it out again
+            assert read_note(opened, ticket.token) == ALONE
+            token = ticket.token
+        assert read_note(opened, token) is None, "nothing is left behind when the landing ends"
+        handle, old = older_landing(project, "bob", pid=1, format=6, version="x", protocol=1)
+        write_note(opened, old, {"members": ["zed", "bob"]})
+        free_note(opened, old)
+        assert read_note(opened, old) is None, "an older lander gets no note it does not expect"
+        let_go(handle)
+    finally:
+        opened.close()
+
+
+OLDER_FOLLOWERS = """\
+import json, sys, types
+from agent_praxis import cli, landing_batch
+ctx, store = cli._ctx()
+try:
+    head = types.SimpleNamespace(id=0, token="the head's own")
+    print(json.dumps([m.name for m in landing_batch._followers(ctx, store.agent(sys.argv[1]), head)]))
+finally:
+    store.close()
+"""
+
+
+def followers_an_older_praxis_would_take(python: Path | str, project: Path, head: str) -> list[str]:
+    """Ask a really installed older Praxis (its own Python) which waiting landings its batch would take behind
+    *head*: its own `_followers`, run in *project*."""
+    env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}  # its code, not this one's
+    done = subprocess.run(
+        [str(python), "-c", OLDER_FOLLOWERS, head], check=False, cwd=str(project), env=env, capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def an_older_head_leaves_this_praxis_alone(python: Path | str, project: Path) -> None:
+    """With a landing of this Praxis (bob) and one of an older Praxis (carol) waiting behind alice: the older Praxis
+    takes only carol into a batch. Without bob's note it would have taken bob too."""
+    for name in ("alice", "bob", "carol"):
+        _saved_work(project, name)
+    # An older Praxis refuses a praxis.toml with a setting it does not know, and `praxis init` of this one writes
+    # every setting there is. A project the older Praxis set up has none of the newer ones: only these are needed.
+    (project / "praxis.toml").write_text('main_branch = "main"\ncheck = ""\n', encoding="utf-8")
+    opened = Store(state(project))
+    carol = None
+    try:
+        with Ticket(opened, "bob", say=lambda _t: None) as bob:
+            carol, _token = older_landing(project, "carol", pid=1, format=4, version="x", protocol=1)
+            assert followers_an_older_praxis_would_take(python, project, "alice") == ["carol"]
+            clear_note(opened, bob.token)
+            assert followers_an_older_praxis_would_take(python, project, "alice") == ["bob", "carol"], (
+                "the note is what keeps it away"
+            )
+    finally:
+        if carol is not None:
+            let_go(carol)
+        opened.close()
+
+
+def installed_praxis(commit: str) -> Path:
+    """The Python of an older Praxis installed on this machine in ~/.praxis-<commit>, as these tests' author has."""
+    home = Path.home() / f".praxis-{commit}"
+    return home / "Scripts" / "python.exe" if os.name == "nt" else home / "bin" / "python"
+
+
+@pytest.mark.parametrize(("commit", "its_format"), [("ab8e599", 4), ("b7ddce6", 6)])
+def test_a_really_installed_older_praxis_does_not_take_this_praxis_into_its_batch(project, commit, its_format):
+    python = installed_praxis(commit)
+    if not python.is_file():
+        pytest.skip(f"no older Praxis is installed at {python.parent.parent}")
+    code, out = praxis("status")
+    assert code == 0, out
+    if its_format < store.USABLE_FROM:  # that Praxis only works in a project it (or one like it) started
+        downgrade(project, its_format)
+        code, out = praxis("status")
+        assert code == 0 and numbers(project) == (store.FORMAT, its_format), out
+    an_older_head_leaves_this_praxis_alone(python, project)
 
 
 def test_a_landing_leaves_an_older_lander_behind_it_alone(project):

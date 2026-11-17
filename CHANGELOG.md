@@ -189,6 +189,27 @@
   later check does not count for the agents it was checking.
 
 ### Changed
+- **You can update Praxis while agents are landing and running heavy jobs.** Until now a newer Praxis either
+  refused `praxis land` until every command of the older one had finished (even a heavy job that was only waiting
+  in line), or, with `--upgrade-now`, took the project over and broke the older landings. Now a project's database
+  carries two numbers: its format, and the oldest format whose Praxis can still use it ("usable from"). A step that
+  only adds a table or a column is taken at once, whoever is running, and leaves "usable from" alone. So the newer
+  Praxis works from its first command, and the older one keeps working beside it: what it is running, and what it
+  starts afterwards. Only a step an older Praxis cannot live with waits for its commands to finish (that is where
+  `--upgrade-now` still applies), and no step since format 5 has been one. `praxis status` names the older commands
+  that are at work and says that they carry on. One thing still stops an older Praxis: a setting in `praxis.toml`
+  that it does not know, so add new settings only when the older Praxis is out of use. See "Updating Praxis while
+  agents work" in the README.
+- **The project database is now format 8, and older versions can still use it.** The step adds one small table
+  (`meta`) that holds the format. The number an already released Praxis reads (SQLite's `user_version`) now means
+  "usable from" and stays at 6 for a new project, or at whatever your project has, so the Praxis you have installed
+  today keeps working after a newer one has opened your project. A Praxis older than your project's "usable from"
+  still refuses it ("This project was used by a newer Praxis"): that is built into the released versions and
+  cannot be changed in them.
+- **No Praxis version takes a landing of another version into its batch.** A newer landing at the head of the line
+  already left older landings alone. Now an older head leaves newer landings alone too: before, its one check for
+  the batch could fail for a reason of its own version, and every newer landing in the batch was told its work
+  failed. Each version's landings are checked by that version, on their own turn.
 - **A background landing no longer makes the commands under it run its own Praxis version.** `praxis land
   --background` (and the full check, an early check and an audit, which Praxis also starts in the background) put
   the folder of its own install into `PYTHONPATH`. Your check inherited that, so every `praxis` the check started
