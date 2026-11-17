@@ -98,6 +98,49 @@ def test_a_real_child_is_found_under_this_process_and_measured():
         child.wait()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="reads the Windows process list")
+def test_each_look_at_a_tree_goes_in_front_of_ordinary_programs_and_puts_the_thread_back(monkeypatch):
+    """On a busy Windows machine a look made at ordinary priority waits for the CPU after nearly every call
+    (processes.in_front). Both looks of a measurement are made in front, and the wait between them is not."""
+    import ctypes
+    from ctypes import wintypes
+
+    from agent_praxis import processes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentThread.restype = wintypes.HANDLE
+    k32.GetThreadPriority.argtypes = [wintypes.HANDLE]
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.GetPriorityClass.argtypes = [wintypes.HANDLE]
+    k32.GetPriorityClass.restype = wintypes.DWORD
+    front = processes.front_level(k32.GetPriorityClass(k32.GetCurrentProcess()))
+    if front is None:
+        pytest.skip("these tests were started above normal priority: their threads are in front already")
+
+    def priority() -> int:
+        return k32.GetThreadPriority(k32.GetCurrentThread())
+
+    before, during = priority(), []
+
+    def reader(roots):
+        during.append(priority())
+        return {root: {root: 1.0 * len(during)} for root in roots}
+
+    monkeypatch.setattr(treecpu, "_windows", reader)
+    finish = treecpu.watch([10], 4)
+    assert priority() == before  # between the two looks the thread is where it was
+    assert finish()[10] is not None
+    assert during == [front, front] and priority() == before
+
+    def broken(roots):
+        during.append(priority())
+        raise OSError("the process list cannot be read")
+
+    monkeypatch.setattr(treecpu, "_windows", broken)
+    assert treecpu.watch([10], 4)() == {10: None}
+    assert during[-2:] == [front, front] and priority() == before
+
+
 # With the machine's reading ------------------------------------------------------------------------------------------
 
 

@@ -221,6 +221,20 @@
   agents' work, the front agent got "NOT landed: files changed while the check ran", exit code 2 and a failed try
   on its record, although its own work had landed minutes before. Its result now stands, and it is told that the
   later check does not count for the agents it was checking.
+- **On a busy Windows PC, `praxis status` no longer waits many seconds for the process list.** To show "N processes
+  working in its folder" for each agent, Praxis reads the command line of every process on the machine, one after
+  another. That needs about a tenth of a second of CPU for every thousand processes, but with every core busy the
+  read took 2 to 25 seconds: at ordinary priority the reading thread kept waiting for a CPU between its calls. Now
+  that thread goes in front of ordinary programs for the length of the read and is put back right after. Measured
+  on a 16-core PC at 100% CPU, the old and the new read turn by turn: with 1,200 to 1,500 processes running, 1.8 to
+  16.7 seconds before and 0.16 to 0.21 seconds now; with 1,300 to 3,000 processes, 6.6 to 24.9 seconds before and
+  0.17 to 0.37 seconds now. The read makes the same calls in the same order and gives the same command lines.
+  Because it is over in a moment, it also finds short programs that used to end while a slow read was still on its
+  way to them. `praxis release-stale` uses the same read, and the two looks `heavy_jobs = "auto"` takes at each
+  running heavy job's processes go in front the same way. No setting of your PC is changed and nothing is
+  installed. A Praxis that was itself started at a lowered priority ("below normal", as Windows' task scheduler
+  starts its tasks, or "idle") takes a bigger step for the read, because two steps up from there is still behind
+  ordinary programs; everything else such a Praxis does stays as slow as the priority it was given.
 
 ### Changed
 - **You can update Praxis while agents are landing and running heavy jobs.** Until now a newer Praxis either

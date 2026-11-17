@@ -68,6 +68,7 @@
   "tests/test_never_loses_work.py": ["tests/test_never_loses_work.py"],
   "tests/test_no_git_yet.py": ["tests/test_no_git_yet.py"],
   "tests/test_pathchecks.py": ["tests/test_pathchecks.py"],
+  "tests/test_processes.py": ["tests/test_processes.py"],
   "tests/test_queue.py": ["tests/test_queue.py"],
   "tests/test_real_world.py": ["tests/test_real_world.py"],
   "tests/test_safeswitch.py": ["tests/test_safeswitch.py"],
@@ -79,5 +80,5 @@
   "tests/test_treecpu.py": ["tests/test_treecpu.py"],
   "tests/test_update.py": ["tests/test_update.py"]
  },
- "untraced": ["tests/test_audit.py", "tests/test_check_command.py", "tests/test_checkfolder.py", "tests/test_formats.py", "tests/test_inputs.py", "tests/test_mixed_versions.py", "tests/test_stopped_landing.py", "tests/test_update.py"]
+ "untraced": ["tests/test_audit.py", "tests/test_check_command.py", "tests/test_checkfolder.py", "tests/test_formats.py", "tests/test_inputs.py", "tests/test_mixed_versions.py", "tests/test_processes.py", "tests/test_stopped_landing.py", "tests/test_update.py"]
 }

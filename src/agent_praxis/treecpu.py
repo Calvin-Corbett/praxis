@@ -3,7 +3,9 @@
 `heavy_jobs = "auto"` must not read the heavy jobs' own work as "the machine is busy" (load.py), so each running
 job is measured by itself: its process (the pid in the heavy table), that process's children, their children.
 Only the Python standard library: on Windows the process list and each process's CPU time come from the system
-through ctypes, on Linux from /proc, elsewhere from `ps`.
+through ctypes, on Linux from /proc, elsewhere from `ps`. On Windows each look goes in front of ordinary programs
+for its length (processes.in_front): on a busy machine one look took up to 1.8 seconds without that, and status
+makes two.
 
 What is not seen: a process whose parent has already ended (only the parent's number is kept, and the chain from
 the job to it is broken), and a program that started and ended between the two looks. Tests replace all of this
@@ -17,6 +19,8 @@ import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
+
+from agent_praxis import processes
 
 WINDOW_SECONDS = 0.25  # the least time between the two looks at each tree's CPU time
 
@@ -84,7 +88,10 @@ def by_parent(parents: dict[int, int]) -> dict[int, list[int]]:
 
 def _look(roots: list[int]) -> Trees:
     try:
-        return _windows(roots) if os.name == "nt" else _proc(roots)
+        if os.name == "nt":
+            with processes.in_front():  # on a busy machine this look takes seconds at ordinary priority
+                return _windows(roots)
+        return _proc(roots)
     except Exception:  # noqa: BLE001 - a load that cannot be measured must never stop a heavy job or status
         return {}
 
@@ -146,8 +153,6 @@ _QUERY_LIMITED = 0x1000
 def _windows(roots: list[int]) -> Trees:
     import ctypes
     from ctypes import wintypes
-
-    from agent_praxis import processes
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.OpenProcess.restype = wintypes.HANDLE
