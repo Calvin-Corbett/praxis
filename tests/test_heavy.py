@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 
 from conftest import praxis, praxis_process
 
@@ -71,6 +72,24 @@ def test_heavy_jobs_must_be_a_positive_whole_number(project):
     _set_limit(project, 0)
     code, out = praxis("status")
     assert code == 1 and "heavy_jobs must be 1 or more" in out, out
+
+
+def test_a_job_with_a_free_place_is_already_running_when_it_first_appears(project, monkeypatch):
+    _set_limit(project, 2)
+    committed_states = []
+    write = Store.write
+
+    @contextmanager
+    def observe_commit(store, exclusive=False):
+        with write(store, exclusive) as db:
+            yield db
+        # Another arrival can first see the job after a commit, before this runner does anything else.
+        committed_states.extend(row["started"] is not None for row in store.rows("SELECT started FROM heavy"))
+
+    monkeypatch.setattr(Store, "write", observe_commit)
+    code, out = praxis("run", "--heavy", *_py("pass"))
+    assert code == 0, out
+    assert committed_states and all(committed_states), committed_states
 
 
 def test_a_third_job_waits_while_two_run_and_says_so(project, tmp_path):

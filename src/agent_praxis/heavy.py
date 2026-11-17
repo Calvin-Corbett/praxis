@@ -155,16 +155,23 @@ def _forget_dead(store: Store, db, mine: int) -> None:
                 pass
 
 
+def _admit(store: Store, db, mine: int, limit: int) -> tuple[bool, list, list, dict]:
+    """Claim a free place in queue order, returning the same snapshot for a wait announcement."""
+    _forget_dead(store, db, mine)
+    jobs = db.execute("SELECT * FROM heavy ORDER BY id").fetchall()
+    rule = rules(store, jobs)
+    ahead = _in_front(jobs, mine, rule)
+    if len(ahead) < limit and all(r["started"] for r in ahead):
+        db.execute("UPDATE heavy SET started = ? WHERE id = ?", (time.time(), mine))
+        return True, [], jobs, rule
+    return False, ahead, jobs, rule
+
+
 def _try_start(store: Store, mine: int, limit: int) -> tuple[bool, list]:
     """Start now if fewer than *limit* jobs run and no waiting job is in front. Else (False, the jobs in front)."""
     with store.write() as db:
-        _forget_dead(store, db, mine)
-        jobs = db.execute("SELECT * FROM heavy ORDER BY id").fetchall()
-        ahead = _in_front(jobs, mine, rules(store, jobs))
-        if len(ahead) < limit and all(r["started"] for r in ahead):
-            db.execute("UPDATE heavy SET started = ? WHERE id = ?", (time.time(), mine))
-            return True, []
-        return False, ahead
+        go, ahead, _, _ = _admit(store, db, mine, limit)
+        return go, ahead
 
 
 def _join(ctx, db, agent: str, token: str, text: str, priority: bool) -> int:
@@ -278,18 +285,14 @@ def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS, wait: bool = T
         store.stamp(handle, order=PLACED)
         if not _try_lock(handle):
             raise RuntimeError("could not lock a brand-new heavy job file")
+        limit, why = limit_now(ctx)  # measuring machine load stays outside the database lock
         with store.write() as db:
             mine = _join(ctx, db, agent, token, text, priority)
+            # Publish either a running job or an actual waiter. A second arrival must not see an
+            # unstarted predecessor that could already have claimed the first of two free places.
+            go, ahead, jobs, rule = _admit(store, db, mine, limit)
         told = seen = None
-        while True:
-            jobs = rows(store)
-            rule = rules(store, jobs)
-            ahead, limit = _in_front(jobs, mine, rule), None
-            if all(r["started"] for r in ahead):  # first in line: only now does the limit decide anything
-                limit, why = limit_now(ctx)  # read outside the database lock: measuring the load takes a moment
-                go, ahead = _try_start(store, mine, limit)
-                if go:
-                    break
+        while not go:
             if not wait:
                 yield None, None
                 return
@@ -305,6 +308,12 @@ def place(ctx, agent: str, text: str, poll: float = POLL_SECONDS, wait: bool = T
                 )
             time.sleep(poll)
             seen = _reread(ctx, seen)
+            jobs = rows(store)
+            rule = rules(store, jobs)
+            ahead, limit = _in_front(jobs, mine, rule), None
+            if all(r["started"] for r in ahead):  # first in line: only now does the limit decide anything
+                limit, why = limit_now(ctx)
+                go, ahead = _try_start(store, mine, limit)
         yield mine, token
     finally:
         if mine is not None:
