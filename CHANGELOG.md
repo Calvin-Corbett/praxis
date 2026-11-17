@@ -145,6 +145,37 @@
   commit with match none of the authors of the main branch's latest commits, `praxis start` and `praxis status` say so,
   naming both, and print the two `git config` lines that set the project's identity.
 
+### Fixed
+- **A landing that was stopped no longer drops work you save afterwards.** Before this, work could be dropped. When
+  the `praxis land` of the agent at the front of a batch was killed during the check (an AI tool's time limit does
+  that), its folder was left on no branch, holding the batch's files. If the agent then saved another commit there,
+  its next `praxis land` said "Put it back on praxis/<agent>; your own saved work was not changed", landed, exited
+  0, and that commit was on no branch and its files were gone from the folder: only git's reflog still had it. Now,
+  before Praxis puts a folder back on its branch, it looks for commits made in it that are on neither the agent's
+  branch nor main and are not the batch's own. It puts copies of them on the branch, in order, tells you which, and
+  only then switches the folder; unsaved edits and new files stay in the folder as they are. When the commits do not
+  fit on the branch, or git would have to overwrite an unsaved edit, Praxis changes nothing, keeps the commits under
+  a name of their own (`refs/praxis/saved/<agent>-<time>`), exits 1 and prints the commands that bring the work
+  back. The same rule holds wherever a folder is put back: a commit made in the front agent's folder while a batch's
+  check runs used to be dropped the same way, and is now carried onto its branch; and levelling a folder after a
+  batch no longer writes over a new file in it that git did not know yet.
+- **Work a batch landed is not landed a second time.** When an agent's waiting `praxis land` ended while the batch
+  that held its work was being checked, the batch still landed the work, but `praxis status` went on saying "N saved
+  change(s) not landed yet", the agent's next `praxis land` took a turn in the line and recorded the same work as a
+  second landing, and the note written for the ended process was never removed. Now every landing a batch records
+  says which saved work it took. `praxis status` shows that work as landed, and `praxis land` says "already landed
+  at <time> (in a batch)", levels the folder and exits 0 without taking a turn or recording anything. Places in the
+  line and notes left by landings whose process has ended are cleared by the next landing.
+- **`praxis status` tells you when a stopped landing left something to put right.** Under NEEDS YOU it lists an
+  agent whose landing was stopped part-way, or whose folder is not on its own branch, with the one command that puts
+  it right: `praxis land <agent>`.
+- **A waiting agent is always told it was taken into a batch.** With a quick check the whole batch could be over
+  between two looks at the line, and the waiting `praxis land` printed its result without the "Your work was taken
+  into a batch: ..." line. It now always prints that line, with the names, before the result.
+- **A second `praxis land` for an agent whose landing is still running says so.** While a landing runs a batch, its
+  agent's folder is on no branch on purpose; a second `praxis land` used to answer with advice to switch the folder
+  back by hand. It now says the agent is already landing, and changes nothing.
+
 ### Changed
 - **On Windows, `bash` in your commands means Git Bash, not WSL.** A check, `setup`, `after_land`, `after_done` or
   `generated` command, or a `praxis run --heavy` command, that started with a bare `bash` or `sh` ran

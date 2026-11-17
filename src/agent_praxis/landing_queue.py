@@ -66,6 +66,31 @@ def clear_note(store: Store, token: str) -> None:
         pass
 
 
+def clear_dead(store: Store) -> None:
+    """Remove what landings whose process has ended left behind: their places in the line, their ticket files, and
+    notes written for them that nobody will read. A ticket's file is locked before its place in the line exists, so
+    one that is not locked belongs to a process that is gone."""
+    for row in store.rows("SELECT id, token FROM queue ORDER BY id"):
+        if ticket_alive(store, row["token"]):
+            continue
+        with store.write() as db:
+            db.execute("DELETE FROM queue WHERE id = ?", (row["id"],))
+        try:
+            (store.dir / "queue" / f"{row['token']}.lock").unlink()
+        except OSError:
+            pass
+        clear_note(store, row["token"])
+    for note in (store.dir / "queue").glob("*.note"):
+        if not ticket_alive(store, note.stem):
+            clear_note(store, note.stem)
+
+
+def stopped(store: Store, agent: str) -> bool:
+    """True when *agent* has a place in the landing line whose `praxis land` has ended, and no running one."""
+    tokens = [row["token"] for row in store.rows("SELECT token FROM queue WHERE agent = ?", (agent,))]
+    return bool(tokens) and not any(ticket_alive(store, token) for token in tokens)
+
+
 def batch_of(store: Store, agent: str) -> list[str]:
     """The agents landing together with *agent* right now (including itself), or [] when it is not in a batch."""
     try:  # the head of a batch keeps a marker file
@@ -108,6 +133,7 @@ class Ticket:
         self.handle = None
         self.id: int | None = None
         self.verdict: dict | None = None  # set when the agent ahead landed (or refused) this agent's work for it
+        self.told_batch: list[str] | None = None  # the batch this agent was last told it is in
 
     def _file(self, token: str) -> Path:
         return self.dir / f"{token}.lock"
@@ -132,19 +158,28 @@ class Ticket:
     def _alive(self, token: str) -> bool:
         return ticket_alive(self.store, token)
 
+    def tell_batch(self, note: dict | None) -> bool:
+        """Say, once for each batch, that this agent's work was taken into it. Also when the first thing this agent
+        sees of the batch is its result: a quick check can be over between two looks at the line."""
+        members = note.get("members") if note else None
+        if not members or members == self.told_batch:
+            return False
+        self.told_batch = members
+        self.say("Your work was taken into a batch: " + ", ".join(members) + " are checked together, once, "
+                 "and each lands in line order. Praxis tells you how it went for you.")
+        return True
+
     def _wait(self) -> None:
-        told = told_batch = None
+        told = None
         last_batch_word = time.monotonic()
         while True:
             note = read_note(self.store, self.token)
             if note and note.get("done"):  # the agent at the head of the line took this one into its batch and is done
+                self.tell_batch(note)
                 self.verdict = note
                 return
-            if note and note.get("members") and told_batch != note["members"]:
-                told_batch = note["members"]
+            if self.tell_batch(note):
                 last_batch_word = time.monotonic()
-                self.say("Your work was taken into a batch: " + ", ".join(told_batch) + " are checked together, once, "
-                         "and each lands in line order. Praxis tells you how it went for you.")
             elif note and note.get("members") and time.monotonic() - last_batch_word >= NOTE_HEARTBEAT_SECONDS:
                 last_batch_word = time.monotonic()
                 self.say("Still waiting for the batch's check (" + ", ".join(note["members"]) + ").")

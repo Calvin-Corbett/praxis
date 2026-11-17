@@ -18,12 +18,15 @@ class GitError(PraxisError):
         super().__init__(f"git {' '.join(args)} did not work:\n{detail}")
 
 
-def git(args: list[str], cwd: Path | str, check: bool = True, stdin: str | None = None) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
+def git(args: list[str], cwd: Path | str, check: bool = True, stdin: str | None = None,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run git in *cwd*. *env* adds variables for this one command (a copied commit keeps its author that way)."""
+    more, env = env or {}, dict(os.environ)
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     env["GIT_EDITOR"] = "true"  # never open an editor and wait for a person
     env["LC_ALL"] = env.get("LC_ALL", "C")
     env.update(agent_env(cwd))
+    env.update(more)
     try:
         proc = subprocess.run(
             ["git", *args], check=False, cwd=str(cwd), capture_output=True, text=True,

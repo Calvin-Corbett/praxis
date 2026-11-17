@@ -23,7 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_praxis import checks, enough, generated, gitops, hooks, landing_batch, paths, shells
+from agent_praxis import checks, enough, generated, gitops, hooks, landing_batch, paths, putback, shells
 from agent_praxis.agents import (
     JOINING_PREFIX,
     PARALLEL_CHECKOUT,
@@ -75,13 +75,13 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
             f"{name}'s folder has a half-finished git rebase or merge. Finish it (fix the files, then "
             "`git rebase --continue`), or cancel it (`git rebase --abort`), then land again."
         )
+    if landing_now(ctx.store, name):  # asked first: while it runs a batch, its folder is on no branch on purpose
+        raise PraxisError(f"{name} is already landing (in another window or process). Wait for that to finish; "
+                          "nothing was changed.")
     landing_batch.restore_folder(ctx, row, folder)  # a batch this agent headed was stopped: put its folder back
     problem = off_branch(row, folder, ctx.say)
     if problem:
         raise PraxisError(f"{problem}\nNothing was landed.")
-    if landing_now(ctx.store, name):
-        raise PraxisError(f"{name} is already landing (in another window or process). Wait for that to finish; "
-                          "nothing was changed.")
     _refuse_embedded_projects(row, folder)
     refuse_links_git_walks_into(row, folder)  # before committing: git would save what a junction points to
     ctx.store.touch(name)
@@ -99,12 +99,19 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
         if finish:
             _finish(ctx, row)
         return True
+    if landing_batch.already_landed(ctx, row, folder, finish):  # by a batch, after this agent's own landing ended
+        if finish:
+            _finish(ctx, row)
+        return True
     progress: dict = {}
     with Ticket(ctx.store, name, ctx.say) as ticket:
         landing_batch.recover(ctx)  # a stopped batch: what it landed is recorded, and its waiting agents are told
         ticket.verdict = ticket.verdict or _done_note(ctx, ticket)
         if ticket.verdict is not None:  # the agent ahead landed (or refused) this agent's work in its batch
+            ticket.tell_batch(ticket.verdict)
             ok = landing_batch.apply_verdict(ctx, row, folder, ticket.verdict, finish)
+        elif landing_batch.already_landed(ctx, row, folder, finish):  # while this landing waited in line
+            ok = True
         else:
             ctx.say(f"It is {name}'s turn to land.")
             try:
@@ -540,7 +547,9 @@ def _back_on_branch(row, folder: Path) -> None:
     short, give the branch its original commits back. Each step leaves the same files in the folder."""
     gitops.abort_operation(folder)
     if gitops.current_branch(folder) != row["branch"]:
-        gitops.git(["checkout", "-q", row["branch"]], folder, check=False)
+        # Only when no commit in the folder would be left on no branch (see putback): a batch's folder is put back
+        # by the batch itself, or by the agent's next landing, which know which commits there are the agent's own.
+        putback.back_if_nothing_is_left_behind(folder, row["branch"])
     keep = f"{JOINING_PREFIX}{row['name']}"
     original = gitops.rev(folder, keep)
     if original is None:

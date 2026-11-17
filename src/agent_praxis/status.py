@@ -5,9 +5,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from agent_praxis import generated, identity, live, paths
+from agent_praxis import generated, identity, landing_batch, live, paths
 from agent_praxis.agents import Ctx, agent_here, folder_state, look_at_agents, stale_agents
-from agent_praxis.landing_queue import batch_of, ticket_alive
+from agent_praxis.landing_queue import batch_of, stopped, ticket_alive
 
 
 def ago(stamp: float, now: float | None = None) -> str:
@@ -61,6 +61,7 @@ def render(ctx: Ctx) -> str:
     paused = [a for a in agents if a["paused"]]
     stale = stale_agents(ctx, now, {n: look.activity for n, look in looks.items() if look.error is None})
     broken = _full_check_needs_you(ctx, now) + _audit_needs_you(ctx, now)
+    broken += _stopped_landings(ctx, agents, looks)
     if paused or stale or broken:
         out.append("NEEDS YOU")
         out += broken
@@ -120,7 +121,11 @@ def render(ctx: Ctx) -> str:
                 raise look.error
             ahead, dirty = look.ahead, look.dirty
             work = []
-            if ahead:
+            landed = landing_batch.landed_already(ctx, a, look.tip) if ahead and not look.off else None
+            if landed is not None:  # a batch landed copies of its commits after its own `praxis land` had ended
+                work.append(f"its saved work landed {when(landed['at'])} (in a batch); `praxis land {a['name']}` "
+                            "levels its folder")
+            elif ahead:
                 work.append(f"{ahead} saved change(s) not landed yet")
             if where != "ok":  # Praxis does not look inside a folder git does not see as this agent's
                 work.append("unknown what is in its folder" if where != "missing" else "its folder is gone")
@@ -181,6 +186,29 @@ def render(ctx: Ctx) -> str:
         out.append("")
         out.append("Note: no check command is set in praxis.toml, so landings are not tested.")
     return "\n".join(out).rstrip() + "\n"
+
+
+def _stopped_landings(ctx, agents, looks) -> list[str]:
+    """What a landing that was stopped part-way (a tool's time limit killed `praxis land`) left to put right: a
+    folder that is not on its own branch, or a place in the line nobody holds. One command does it."""
+    out = []
+    for a in agents:
+        look = looks[a["name"]]
+        if look.landing or look.error is not None:  # a running landing has the folder on no branch on purpose
+            continue
+        cut = stopped(ctx.store, a["name"]) or landing_batch.stopped(ctx, a["name"])
+        if not cut and not look.off:
+            continue
+        what = "landing was stopped part-way" if cut else "folder is not on its own branch"
+        if cut and look.off:
+            what += f", and its folder was left on {look.off} (it belongs on {a['branch']})"
+        elif look.off:
+            what += f" {a['branch']} (it is on {look.off})"
+        out.append(f"  - {a['name']}'s {what}. Nothing is lost.")
+        out.append(f"      To put it right, run: praxis land {a['name']}")
+        out.append("      (it puts the folder back with everything saved in it, lands what has not landed, and says "
+                   "so when the work already landed)")
+    return out
 
 
 def _checks_lines(ctx) -> list[str]:

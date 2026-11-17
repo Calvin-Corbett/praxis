@@ -22,9 +22,18 @@ import os
 import time
 from pathlib import Path
 
-from agent_praxis import enough, generated, gitops, hooks
+from agent_praxis import enough, generated, gitops, hooks, putback
 from agent_praxis.agents import Ctx, _tree, folder_state, off_branch
-from agent_praxis.landing_queue import PROTOCOL, clear_note, read_note, ticket_alive, ticket_protocol, write_note
+from agent_praxis.errors import PraxisError
+from agent_praxis.landing_queue import (
+    PROTOCOL,
+    clear_dead,
+    clear_note,
+    read_note,
+    ticket_alive,
+    ticket_protocol,
+    write_note,
+)
 
 MARKERS = "batches"
 
@@ -93,29 +102,71 @@ def _markers(ctx: Ctx) -> list[dict]:
     return found
 
 
-def restore_folder(ctx: Ctx, row, folder: Path) -> None:
+def _marker_of(ctx: Ctx, agent: str) -> dict | None:
+    return next((m for m in _markers(ctx) if m["agent"] == agent), None)
+
+
+def stopped(ctx: Ctx, agent: str) -> bool:
+    """True when a batch *agent* headed was stopped part-way and its folder has not been put back yet."""
+    marker = _marker_of(ctx, agent)
+    return marker is not None and not ticket_alive(ctx.store, marker["token"])
+
+
+def put_back(ctx: Ctx, row, folder: Path, marker: dict | None) -> putback.Result:
+    """Put a folder that a batch left on no branch back on the agent's own branch, keeping every commit and every
+    unsaved edit made in it since (see putback). *marker* says which commits there are the batch's own."""
+    marker = marker or {}
+    landing = marker.get("landing") or {}
+    return putback.put_back(
+        folder,
+        row["name"],
+        row["branch"],
+        f"refs/heads/{ctx.cfg.main_branch}",
+        known=[*marker.get("candidates", []), landing.get("tip")],
+        copies_of=[m.get("tip") for m in marker.get("members", [])],
+    )
+
+
+def _say_put_back(ctx: Ctx, row, result: putback.Result, stopped: bool = True) -> None:
+    """*stopped*: a landing that was stopped left the folder there (else: the batch that has just ended)."""
+    start = f"{row['name']}'s folder was left on a batch candidate by a landing that was stopped."
+    if result.carried:
+        when = f"{start} {len(result.carried)} commit(s) were saved in it after that" if stopped else (
+            f"{len(result.carried)} commit(s) were saved in {row['name']}'s folder while the batch was being checked"
+        )
+        ctx.say(
+            f"{when}, on no branch. Praxis put them on "
+            f"{row['branch']}, in order, and put the folder back on {row['branch']}:\n"
+            + "\n".join(f"  - {line}" for line in result.carried)
+            + "\nNothing else changed: your own saved work is as it was."
+        )
+    elif result.moved:
+        ctx.say(f"{start} Put it back on {row['branch']}; your own saved work was not changed.")
+
+
+def restore_folder(ctx: Ctx, row, folder: Path, then: str = "Nothing was landed.") -> None:
     """A batch that was stopped part-way leaves its head's folder on a detached HEAD holding the batch's files. Put
-    the folder back on its own branch (the branch itself was never moved). Only when no landing is still running."""
-    marker = next((m for m in _markers(ctx) if m["agent"] == row["name"]), None)
+    the folder back on its own branch (the branch itself was never moved), with whatever the agent saved or edited
+    in the folder since. When that cannot be done nothing is changed, and the agent is told how to carry on. Only
+    when no landing is still running."""
+    marker = _marker_of(ctx, row["name"])
     if marker is None or ticket_alive(ctx.store, marker["token"]):
         return
     if gitops.current_branch(folder) is None and gitops.operation_in_progress(folder) is None:
-        proc = gitops.git(["checkout", "-q", row["branch"]], folder, check=False)
-        if proc.returncode == 0:
-            ctx.say(
-                f"{row['name']}'s folder was left on a batch candidate by a landing that was stopped. Put it "
-                f"back on {row['branch']}; your own saved work was not changed."
-            )
+        result = put_back(ctx, row, folder, marker)
+        if not result.ok:
+            raise PraxisError(putback.explain(result, row["name"], row["branch"], folder) + f"\n{then}")
+        _say_put_back(ctx, row, result)
 
 
 def recover(ctx: Ctx) -> None:
     """At the start of every turn: settle batches whose head stopped. If main moved to a batch's candidate, record the
     landings that happened (and tell the agents still waiting in it); drop markers nobody needs."""
-    if not (ctx.store.dir / MARKERS).exists():
-        return
-    for marker in _markers(ctx):
-        if not ticket_alive(ctx.store, marker["token"]):
-            _settle(ctx, marker)
+    if (ctx.store.dir / MARKERS).exists():
+        for marker in _markers(ctx):
+            if not ticket_alive(ctx.store, marker["token"]):
+                _settle(ctx, marker)
+    clear_dead(ctx.store)  # places in line, and notes, of landings whose process has ended
 
 
 def _settle(ctx: Ctx, marker: dict) -> None:
@@ -124,33 +175,15 @@ def _settle(ctx: Ctx, marker: dict) -> None:
     if landing and not marker.get("recorded"):
         tip = gitops.rev(ctx.repo.root, main_ref)
         if tip and gitops.is_ancestor(ctx.repo.root, landing["tip"], tip):
+            names = [m["agent"] for m in marker.get("members", [])]
             for entry in landing["members"]:
-                known = ctx.store.row(
-                    "SELECT 1 FROM landings WHERE agent = ? AND ok = 1 AND commit_id = ?",
-                    (entry["agent"], entry["commit"]),
-                )
-                if known is None:
-                    with ctx.store.write() as db:
-                        db.execute(
-                            "INSERT INTO landings (agent, task, at, ok, kind, summary, log, commit_id) "
-                            "VALUES (?, ?, ?, 1, 'landed', ?, ?, ?)",
-                            (
-                                entry["agent"],
-                                entry["task"],
-                                time.time(),
-                                entry["summary"] + " (recorded after the landing was stopped)",
-                                entry.get("log"),
-                                entry["commit"],
-                            ),
-                        )
+                summary = entry["summary"] + " (recorded after the landing was stopped)"
+                _record(ctx, entry["agent"], entry["task"], summary, entry.get("log"), entry["commit"], entry["tip"])
                 if entry.get("token") and ticket_alive(ctx.store, entry["token"]) and entry["agent"] != marker["agent"]:
-                    write_note(
-                        ctx.store,
-                        entry["token"],
-                        _landed_note(
-                            ctx, entry["agent"], entry["task"], entry["tip"], landing["tip"], entry["summary"]
-                        ),
+                    note = _landed_note(
+                        ctx, entry["agent"], entry["task"], entry["tip"], landing["tip"], entry["summary"]
                     )
+                    write_note(ctx.store, entry["token"], {**note, "members": names})
         marker["recorded"] = True
         marker["landing"] = None
         _save_marker(ctx, marker)
@@ -161,6 +194,69 @@ def _settle(ctx: Ctx, marker: dict) -> None:
     folder = Path(marker["folder"])
     if not folder.exists() or gitops.current_branch(folder) == marker["branch"]:
         _drop_marker(ctx, marker["agent"])
+
+
+# --- what a batch landed, for an agent whose own `praxis land` was not there to hear it ------------------------------
+#
+# A batch lands copies of each agent's commits, so an agent's branch still holds the originals afterwards. Its waiting
+# `praxis land` levels the folder when the head tells it. If that process has ended, the database is what remembers:
+# each landing a batch records carries, in `signature` (not used by a landing that worked), the saved work it took
+# from the agent: its branch as it was. A branch that is still exactly that has nothing left to land.
+
+
+def _record(ctx: Ctx, agent: str, task: str, summary: str, log: str | None, commit: str, pinned: str | None) -> None:
+    """Write down, once, that a batch landed *agent*'s saved work *pinned* as *commit*."""
+    with ctx.store.write() as db:
+        known = db.execute(
+            "SELECT 1 FROM landings WHERE agent = ? AND ok = 1 AND commit_id = ?", (agent, commit)
+        ).fetchone()
+        if known is None:
+            db.execute(
+                "INSERT INTO landings (agent, task, at, ok, kind, summary, log, commit_id, signature) "
+                "VALUES (?, ?, ?, 1, 'landed', ?, ?, ?, ?)",
+                (agent, task, time.time(), summary, log, commit, pinned),
+            )
+
+
+def landed_already(ctx: Ctx, row, tip: str | None = None):
+    """The landing (its row) that already put into main exactly what the agent's branch holds now, or None. *tip* is
+    the commit the branch is at, when the caller knows it. git is only asked when the database has such a landing."""
+    root = ctx.repo.root
+    tip = tip or gitops.rev(root, f"refs/heads/{row['branch']}")
+    if not tip:
+        return None
+    found = ctx.store.row(
+        "SELECT * FROM landings WHERE agent = ? AND ok = 1 AND signature = ? ORDER BY id DESC LIMIT 1",
+        (row["name"], tip),
+    )
+    if found is None or not found["commit_id"]:
+        return None
+    return found if gitops.is_ancestor(root, found["commit_id"], f"refs/heads/{ctx.cfg.main_branch}") else None
+
+
+def already_landed(ctx: Ctx, row, folder: Path, finish: bool = False) -> bool:
+    """True when a batch already landed everything the agent has saved (its own `praxis land` had ended before it
+    could be told). Says so and levels the folder: no turn in the line is needed, and no second landing is recorded."""
+    recover(ctx)  # a batch that was stopped right after it moved main: write down what it landed first
+    found = landed_already(ctx, row)
+    if found is None:
+        return False
+    at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(found["at"]))
+    ctx.say(
+        f'{row["name"]}\'s saved work on "{row["task"]}" already landed at {at} (in a batch): it is in '
+        f"{ctx.cfg.main_branch}. Nothing is landed twice."
+    )
+    pinned = gitops.rev(ctx.repo.root, f"refs/heads/{row['branch']}")
+    if catch_up(ctx, row, folder, pinned, found["commit_id"], quiet=True):
+        ctx.say(f"{row['name']}'s folder now holds its work as it landed.")
+    else:
+        ctx.say(
+            f"{row['name']}'s folder still holds the commits as they were before landing: it could not be levelled "
+            f"just now. Nothing is lost; run `praxis land {row['name']}` again."
+        )
+    if not finish:
+        ctx.say(f"When the task is finished: praxis done {row['name']}")
+    return True
 
 
 # --- who can join --------------------------------------------------------------------------------------------------
@@ -389,6 +485,9 @@ class _Run:
                 continue
             m.commit = new
             built.append(m)
+        if built:  # written down before the check runs: what is in the folder now is the batch's, not the agent's
+            self.marker.setdefault("candidates", []).append(gitops.rev(folder, "HEAD"))
+            _save_marker(self.ctx, self.marker)
         return built
 
     def _leave_out(self, m: Member) -> None:
@@ -401,11 +500,11 @@ class _Run:
         m.outcome = outcome
         if m is self.head:
             return
-        write_note(
-            self.ctx.store,
-            m.token,
-            {"done": True, "ok": ok, "lines": m.sink.lines if m.sink else [], "commit": commit, "pinned": m.tip},
-        )
+        if not ticket_alive(self.ctx.store, m.token):
+            clear_note(self.ctx.store, m.token)  # its process has ended: what landed is in the database (_record)
+            return
+        note = {"done": True, "ok": ok, "lines": m.sink.lines if m.sink else [], "commit": commit, "pinned": m.tip}
+        write_note(self.ctx.store, m.token, {**note, "members": [e["agent"] for e in self.marker["members"]]})
 
     # the check ---------------------------------------------------------------------------------------------------
 
@@ -563,7 +662,7 @@ class _Run:
             self.head.outcome = "refused"
             raise Abort
         for m in built:
-            L._record_landing(m.ctx, m.row, summary, log, m.commit)
+            _record(ctx, m.name, m.row["task"], summary, log, m.commit, m.tip)
             m.outcome, m.landed_at = "landed", tip
         self.marker["recorded"] = True
         _save_marker(ctx, self.marker)
@@ -594,33 +693,39 @@ class _Run:
         if gitops.operation_in_progress(folder):
             gitops.abort_operation(folder)
         if gitops.current_branch(folder) != branch:
-            proc = gitops.git(["checkout", "-q", branch], folder, check=False)
-            if proc.returncode != 0:
-                if not quiet:
-                    ctx.say(
-                        f"{head.name}'s folder could not be put back on {branch}: {(proc.stderr or '').strip()}\n"
-                        "It will be put back by the next landing, or run `git switch " + branch + "` in it."
-                    )
+            # A commit made in the folder while the batch ran (the agent kept working) is carried onto the branch.
+            result = put_back(ctx, head.row, folder, self.marker)
+            if not result.ok:
+                if not quiet and result.why:  # (on another branch: the agent's next landing says what to do)
+                    ctx.say(putback.explain(result, head.name, branch, folder, stopped=False))
                 return
+            if result.carried:
+                _say_put_back(ctx, head.row, result, stopped=False)
         if head.outcome == "landed" and head.landed_at:
             catch_up(ctx, head.row, folder, head.tip, head.landed_at, quiet=quiet)
         if not self.marker.get("landing") or self.marker.get("recorded"):
             _drop_marker(ctx, head.name)
 
 
-def catch_up(ctx: Ctx, row, folder: Path, pinned: str, commit: str, quiet: bool = False) -> None:
+def catch_up(ctx: Ctx, row, folder: Path, pinned: str, commit: str, quiet: bool = False) -> bool:
     """After an agent's work landed as rebased copies: level its folder with the version that holds them, when that is
     safe (still on its branch, at the saved work the batch took, nothing unsaved). The landed copies hold every one of
-    its changes, so nothing is lost; if it is not safe, the agent's next landing simply sets the old commits aside."""
+    its changes, so nothing is lost; if it is not safe, the agent's next landing simply sets the old commits aside.
+    True when the folder was levelled."""
     branch = row["branch"]
     if (
         gitops.current_branch(folder) != branch
         or gitops.rev(folder, f"refs/heads/{branch}") != pinned
         or gitops.dirty_files(folder, untracked=False)
     ):
-        return
-    if gitops.git(["reset", "-q", "--hard", commit], folder, check=False).returncode == 0 and not quiet:
+        return False
+    # --keep, not --hard: git then refuses (changing nothing) rather than write over an edit made this instant, or
+    # over a new file of the agent's that git does not know and that another agent's landed work also adds.
+    if gitops.git(["reset", "-q", "--keep", commit], folder, check=False).returncode != 0:
+        return False
+    if not quiet:
         ctx.say(f"{row['name']}'s folder now matches the main version.")
+    return True
 
 
 # --- the other agents' side ----------------------------------------------------------------------------------------

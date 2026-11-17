@@ -603,6 +603,8 @@ class Look:
     error: BaseException | None = None  # reading past the folder check failed
     running: int = 0  # programs working inside its folder right now (a test run, a build)
     landing: bool = False  # a landing (and its check) for it is running or waiting in line
+    off: str | None = None  # where its folder is when not on its own branch: another branch's name, or "no branch"
+    tip: str | None = None  # the commit its own branch is at
 
 
 def busy(ctx: Ctx, rows: list, procs: list | None = None) -> dict[str, tuple[int, bool]]:
@@ -647,8 +649,12 @@ def look_at_agents(ctx: Ctx, rows: list) -> dict[str, Look]:
             else:
                 tip = gitops.rev(ctx.repo.root, branch_ref)
                 stamp = gitops.commit_time(ctx.repo.root, row["branch"]) if tip else None
+            look.tip = tip
             look.dirty = gitops.dirty_files(folder) if usable else []
             look.ahead = gitops.commits_not_in(ctx.repo.root, [tip, *([head] if usable else [])], [main_ref])
+            if usable and head != tip:  # on its own branch the two are the same commit: no need to ask
+                on = gitops.current_branch(folder)
+                look.off = None if on == row["branch"] else (on or "no branch")
             newest = float(row["last_seen"])
             if tip and stamp:
                 # The branch's own unlanded count: the same number as above unless the folder is on another commit.
@@ -995,6 +1001,9 @@ def done(ctx: Ctx, name: str) -> None:
                 "`git rebase --continue`), or cancel it (`git rebase --abort`), then run the same command again. "
                 "Nothing was removed."
             )
+        from agent_praxis import landing_batch  # here: landing_batch imports this module
+
+        landing_batch.restore_folder(ctx, row, folder, then="Nothing was removed.")  # a stopped batch left it
         problem = off_branch(row, folder, ctx.say)
         if problem:
             raise PraxisError(f"{problem}\nNothing was removed.")

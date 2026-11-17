@@ -230,16 +230,23 @@ and lands them together, so nine waiting agents do not wait nine checks one afte
 agent's saved work on top of the newest version in line order, runs your check **once** for all of them, and if
 it passes lands them all: each agent's commits stay its own, in line order, still marked by agent. Every waiting
 `praxis land` still prints only its own result and exits with its own code (0, 1, 2 or 3 as above), and "taken
-into a batch" shows in its output while it waits.
+into a batch", with the names, always shows in its output before the result.
 
 If the check fails, Praxis cuts the batch in half and checks each half on top of the newest version, again and
 again, until it finds the work that broke it. The halves that pass land; the work that failed is refused with the
 check's own output, and the others carry on. Nothing lands that was not checked as exactly what lands. An agent
 whose work cannot join a batch (its changes clash with another agent's in the same batch) is left out and lands on
 its own turn, so a refusal for a clash or for undoing another agent's work still names whose landing it is. With one
-agent waiting, landing works exactly as it did before. If the agent at the front is stopped part-way, every agent's
-work is still saved: the next landing records whatever did land, puts the stopped agent's folder back on its own
-branch, and the line carries on. `praxis status` shows who is in a batch. Turn it off, or cap it, with `batch_max`.
+agent waiting, landing works exactly as it did before. `praxis status` shows who is in a batch. Turn it off, or cap
+it, with `batch_max`.
+
+If a `praxis land` in a batch is stopped part-way (an AI tool's time limit kills it), nobody's work is lost and
+none is landed twice. When it was the agent at the front, the next landing records whatever did land and the line
+carries on; that agent's folder is left on no branch, holding the batch's files, and its next `praxis land` puts it
+back on its own branch together with every commit saved in it since (it says which) and every unsaved edit. When
+it was an agent waiting in the batch, the batch still lands its work, and its next `praxis land` says "already
+landed at <time> (in a batch)", levels its folder and exits 0 without taking a turn. Until then `praxis status`
+lists the agent under NEEDS YOU with that one command.
 
 A batch uses the same memory of passed checks as a single landing. With named checks (see "Named checks" below), a
 batch whose checks all have a remembered pass for the files they read in the batch lands without running anything.
@@ -662,6 +669,9 @@ says nothing, or less than the batch needs, lands on its own turn.
   shows the check, the landing that used the pass and the log, has dropped that check's remembered passes, and runs
   it every time from now on. Add the missing files to its `inputs` in praxis.toml, then run `praxis trust <check>`.
   If that landing broke the project, have an agent land a fix: Praxis never undoes a landing by itself.
+- **A landing was stopped part-way.** An agent's `praxis land` ended before it finished (a tool's time limit, a
+  closed window), or its folder is not on its own branch. Nothing is lost. Run `praxis land <name>`: it puts the
+  folder back with everything saved in it, lands what has not landed, and says so when the work already landed.
 - **An agent went quiet.** If an agent still holds files but has shown no sign of work for a long time
   (24 hours by default, `stale_after_hours` in praxis.toml), Praxis shows it. If that agent has stopped for
   good, run `praxis release-stale <name>` so others can use its files. Its folder and work are kept.
@@ -747,6 +757,24 @@ The agent switched branches in its folder. Praxis will not land or remove that f
 on its own branch, so nothing gets skipped. The message gives the exact command when there is a safe one.
 `praxis abandon <name>` also keeps everything, on `praxis-saved/...` branches.
 
+**"...'s folder was left on a batch candidate by a landing that was stopped"**
+The agent was at the front of a batch and its `praxis land` was killed during the check, so its folder stayed on
+no branch, holding the batch's files. Praxis put it back on the agent's own branch. If the agent saved commits in
+the folder in the meantime, Praxis put copies of them on the branch first, in order, and lists them; unsaved edits
+and new files stay in the folder. Nothing to do.
+
+**"...'s folder ... was left on no branch by a landing that was stopped" and nothing landed (exit code 1)**
+The same, but Praxis could not put the folder back by itself, so it changed nothing: the folder is exactly as it
+was. Either the commits saved in it since clash with what the agent's branch holds (the message lists them, names
+the `refs/praxis/saved/<agent>-<time>` they are also kept under, and gives the `git switch` and `git cherry-pick`
+lines that bring them onto the branch), or git would have to overwrite an unsaved edit (save it as a commit right
+there, as the message says, and land again: Praxis then carries that commit onto the branch). When the work is
+safely landed you can remove the kept name with `git update-ref -d refs/praxis/saved/<agent>-<time>`.
+
+**"...'s saved work ... already landed at ... (in a batch)"**
+Not a problem. The agent's earlier `praxis land` ended while it waited in a batch, and the batch landed its work
+anyway. This landing levelled the agent's folder and landed nothing a second time.
+
 **"... is in the middle of a git rebase"**
 Someone started a `git rebase` of the main branch in the main folder and it has not finished. Finish it
 (`git rebase --continue`) or cancel it (`git rebase --abort`), then land again.
@@ -808,6 +836,8 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 - Agent folders: next to your project in `<project>-praxis/` (outside it, so game engines do not import
   copies of your project). Change this with `worktree_root` in praxis.toml.
 - Each agent works on its own git branch, `praxis/<name>` (`branch_prefix` in praxis.toml changes the start).
+- Commits an agent saved in a folder a stopped landing had left on no branch, when Praxis could not put them on
+  its branch by itself: under `refs/praxis/saved/<agent>-<time>`. Praxis never removes these.
 - The early checks' scratch folder (with `speculate = true`): `<project>-praxis/_early`, on no branch.
 - The full check's scratch folder: `<project>-praxis/_fullcheck`, on no branch. Its runs are recorded in the
   database (format 5), and their output is in `.git/praxis/logs/full-check-*.log`.

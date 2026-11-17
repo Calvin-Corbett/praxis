@@ -115,8 +115,7 @@ def test_two_agents_land_together_with_one_check(project, tmp_path):
     new_agent(project, "bob")
     procs, release = land_behind_a_ghost(project, ["alice", "bob"])
     release()
-    # The check waits for the gate, so bob has time to be told. A batch that is over before bob next looks at the
-    # line (a quick check on a fast disk) takes bob straight to its result, without this notice: that is right too.
+    # The check waits for the gate, so bob is told while the batch is still being checked.
     told = read_until(procs[1], "taken into a batch")
     gate.write_text("go")
     told += procs[1].stdout.read()
@@ -187,7 +186,9 @@ def test_batch_max_caps_the_batch(project, tmp_path):
     codes, outs = finish(procs)
     assert codes == [0, 0, 0], outs
     assert runs(log) == 2, "alice and bob together, then carol"
-    # Not the "taken into a batch" notice: a batch that is over within one look at the line never prints it.
+    # bob is told about the batch before its result, even when the batch is over within one look at the line.
+    assert "taken into a batch: alice, bob " in outs[1], outs[1]
+    assert outs[1].index("taken into a batch") < outs[1].index("Landed: bob's work"), outs[1]
     assert "together with alice, bob" in outs[1] and "together" not in outs[2]
 
 
