@@ -247,7 +247,9 @@ carries on; that agent's folder is left on no branch, holding the batch's files,
 back on its own branch together with every commit saved in it since (it says which) and every unsaved edit. When
 it was an agent waiting in the batch, the batch still lands its work, and its next `praxis land` says "already
 landed at <time> (in a batch)", levels its folder and exits 0 without taking a turn. Until then `praxis status`
-lists the agent under NEEDS YOU with that one command.
+lists the agent under NEEDS YOU with that one command. (With `check_folder = "line"` a batch is put together and
+checked in the landing line's own folder, never in an agent's, so the front agent's folder stays on its branch: see
+"Checking in the line's own folder" below.)
 
 A batch uses the same memory of passed checks as a single landing. With named checks (see "Named checks" below), a
 batch whose checks all have a remembered pass for the files they read in the batch lands without running anything.
@@ -376,6 +378,81 @@ for one). If that agent's work clashes with the work that is landing, there is n
 about the clash on its own turn, as always. It trades CPU for waiting time, so leave it off on a busy machine.
 `praxis status` shows a running early check, and its output goes to `.git/praxis/logs/early-check-*.log`.
 With named checks (below), what an early check hands over is one remembered pass for each check that passed.
+
+### Checking in the line's own folder
+
+Off by default. Normally a landing's check runs in the folder of the agent that is landing, and a batch's check in
+the folder of the agent at the front of the line. So nothing in that folder may change while the check runs: one
+edit there and the check may not have tested what would land, the landing is refused ("files changed while the check
+ran"), and when the check reads the whole project every other agent in the batch pays for it again on its own turn.
+
+With `check_folder = "line"` in `praxis.toml` the landing line checks in a folder of its own,
+`<project>-praxis/_line`: a git worktree on no branch, made at the first landing that needs it and kept. Before each
+check Praxis makes it hold exactly the files being landed: the candidate's files as git has them, and nothing left
+over from the check before except what git ignores. Then:
+
+- **An edit in an agent's folder cannot spoil a check.** The verdict stands, for one landing and for a batch, and
+  nobody pays for a check twice.
+- **You can keep working while your landing is checked.** A landing lands your work as it was saved when the
+  landing started. Commits you save in your folder after that, and files you change there, are not looked at again:
+  no check tested them, so they do not land. They stay in your folder, on your branch; the landing names them when
+  it ends, and your next `praxis land` lands them.
+- **What your tools cache stays warm in one place.** Build output, compiled files, test caches (whatever git
+  ignores) stay in that one folder from landing to landing, and git rewrites only the files that differ from the
+  landing before, so a tool that goes by file times rebuilds only those.
+- **A batch is put together there too**, and when it fails each smaller group is checked there, one after another.
+  The front agent's folder never leaves its branch, so a `praxis land` that is stopped part-way leaves nothing in
+  an agent's folder to put right.
+
+It is one extra folder for the project, however many agents land: a copy of the committed files, plus whatever your
+`setup` installs and your check builds in it.
+
+**It is off unless you set it, because the two ways of checking are not the same for every project.** They agree
+on the files git tracks (exactly the candidate), the command, what the command is told (`PRAXIS_AGENT`,
+`PRAXIS_TASK`, `PRAXIS_CHECK`, `PRAXIS_BASE`, `PRAXIS_CHANGED_FILES` and your `env`), and the memory of passed
+checks: a pass is remembered by the files and the command, never by the folder, so a pass earned one way counts
+the other way too. They can differ in four things:
+
+- **Files git ignores.** The line's folder holds what is committed, the `share` folders (linked, as in an agent
+  folder) and what `setup` makes in it. `setup` runs there once, when the folder is made, and again when you change
+  the `setup` line in `praxis.toml`. Packages an agent installed by hand in its own folder, or build output it left
+  there, are not in the line's folder: a check that needs them fails there. And when a landing changes what must be
+  installed (a new dependency), nothing installs it there by itself: let the check command install what it needs
+  (`npm ci && npm test`), or `share` the folder, or delete the small file
+  `.git/praxis/fullcheck/_line-setup.txt`: `setup` then runs in the folder again before the next check.
+- **What earlier checks left behind.** In an agent's folder a check finds, in the ignored folders, what that agent's
+  own earlier work left. In the line's folder it finds what the checks of the landings before it left, which is what
+  makes it fast. A check that trusts a stale cache (the compiled copy of a source file that has been deleted) can
+  give a different answer there.
+- **The folder's path and branch.** The check's working folder is `<project>-praxis/_line`, not
+  `<project>-praxis/<agent>`, and it is on no branch: `git branch --show-current` prints nothing there (as in a
+  batch's check before), while `git diff --name-only $PRAXIS_BASE HEAD` gives the same names as always. A check
+  that finds the agent's folder from `PRAXIS_AGENT`, or needs the branch name, sees the difference.
+- **Files the check rewrites.** A check that rewrites files git tracks is refused either way, unless they are
+  listed in `check_may_change`. In the line's folder no copy of them is kept in `.git/praxis/kept`, because nobody
+  edits there.
+
+**Try it before you turn it on.** `praxis check <agent>` runs your check in a scratch folder made the same way
+(only committed files, `share` linked, `setup` run once). If it passes there on work that lands today, it passes in
+the line's folder. If it fails there for a missing package or file, put that right in `setup`, `share` or the check
+command first.
+
+Good to know:
+
+- One landing at a time uses the folder, the one whose turn it is, and it keeps
+  `.git/praxis/checkfolder/running.lock` locked meanwhile. Early checks, `praxis check`, the audit and the full
+  check each have a scratch folder of their own, so none of them ever writes into the line's folder or waits for it.
+  If the lock is ever held by another process, the landing says so and checks in the agent's folder, as without the
+  setting.
+- If a landing is killed during its check, the next landing first clears what it left in the folder: changed
+  files, new files, a half-done git step. Nothing in an agent's folder is touched for that: a rebase or merge the
+  agent has under way there stays its own.
+- If the folder cannot be made ready (your `setup` fails in it), nothing lands, it does not count against the
+  agent, and the message says what to fix.
+- If the main version moves while the check runs (someone commits to it outside Praxis), the work has to go on top
+  of the newer version and be checked again, and that step happens in the agent's folder. When that folder has
+  changed since the landing started, the landing stops there and says so, rather than land work it did not start
+  with; land again.
 
 ### Named checks: a pass is remembered for the files the check reads
 
@@ -550,6 +627,13 @@ believe in a safety net that is not there.
 **`speculate`** (default `false`): start the next waiting agent's check early, while the check of the agent at the
 front of the landing line runs (see "Early checks for the line" above). One at a time, and only when a heavy job
 place is free.
+
+**`check_folder`** (default `"agent"`): where a landing's check runs. `"agent"`: in the folder of the agent that is
+landing (for a batch, of the agent at the front of the line), where nothing may change while the check runs.
+`"line"`: in a folder the landing line keeps for itself, on exactly the files being landed, so an edit in an
+agent's folder never costs anyone a second check and agents keep working while their landing is checked (see
+"Checking in the line's own folder" above). It needs a check that passes in a folder holding only the committed
+files, the `share` folders and what `setup` makes: `praxis check <agent>` shows you whether yours does.
 
 **The check cache.** When the exact files that would land (the git tree of the candidate) already passed the same
 check command, Praxis does not run the check again and says "Skipping the check: same tree already passed at
@@ -923,6 +1007,8 @@ Run the command again with `PRAXIS_DEBUG=1` set to see the technical details, an
 - Commits an agent saved in a folder a stopped landing had left on no branch, when Praxis could not put them on
   its branch by itself: under `refs/praxis/saved/<agent>-<time>`. Praxis never removes these.
 - The early checks' scratch folder (with `speculate = true`): `<project>-praxis/_early`, on no branch.
+- The landing line's own check folder (with `check_folder = "line"`): `<project>-praxis/_line`, on no branch, kept
+  between landings. You may delete it when no landing is running; Praxis makes it again.
 - The full check's scratch folder: `<project>-praxis/_fullcheck`, on no branch. Its runs are recorded in the
   database (format 5), and their output is in `.git/praxis/logs/full-check-*.log`.
 - The check cache (the newest 200 passes) and the heavy job queue are in the same database; each job's output goes to `.git/praxis/logs/<agent>-heavy-<time>.log`.

@@ -344,11 +344,15 @@ def run(
     wait_for=None,
     before_run=None,
     batch: list[str] | None = None,
+    own=None,
 ) -> Outcome:
     """Bring the candidate *checked* (the commit *folder* holds) through *checks*: a check with a remembered pass is
     skipped, and says so; the others run in *folder*, and those that pass are remembered. When files git tracks
     changed while they ran (`moved` then says what), only a pass that cannot have read them is (see _read_none_of).
     A failure stops the checks not yet started.
+
+    With *own*, the landing line's own folder (see checkfolder), the checks that have to run do so there instead: it
+    is first made to hold exactly the candidate, and nobody but the checks can change a file in it meanwhile.
 
     *base* is the main version the candidate is built on and *changed* the files it changes from there: every
     check command is told both (see _run_one). *wait_for(tree, signature, passed)* is asked first when something is left to run (an early check of
@@ -369,15 +373,22 @@ def run(
     todo = [step for step in steps if step.how == "waiting"]
     if not todo:
         return outcome
+    spot = folder if own is None else own.hold(checked)  # where the checks run
     if before_run is not None:
         before_run()
-    _run_all(ctx, row, folder, todo, batch, (base, changed))
-    L._put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
+    _run_all(ctx, row, spot, todo, batch, (base, changed))
+    if own is None:
+        L._put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
+    else:
+        own.put_back_check_rewrites()
     passed = [step for step in todo if step.how == "passed"]
     if passed:
-        outcome.moved = L._changed_during_check(ctx, row, folder, checked)
+        if own is None:
+            outcome.moved = L._changed_during_check(ctx, row, folder, checked)
+        else:
+            outcome.moved = own.changed_by_check(checked)
         if outcome.moved is not None:
-            passed = _read_none_of(passed, _touched(folder, checked))
+            passed = _read_none_of(passed, _touched(spot, checked))
         for step in passed:
             remember(ctx.store, step.check, keys, step.log)  # only a pass is remembered, never a failure
     return outcome

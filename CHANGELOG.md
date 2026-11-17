@@ -3,6 +3,23 @@
 ## Unreleased
 
 ### New
+- **The landing line can check in a folder of its own, so you can keep working while your landing is checked.**
+  Until now a landing's check ran in the landing agent's folder (a batch's in the folder of the agent at the front).
+  One edit there during the check refused the landing, and when the check reads the whole project every other
+  agent in the batch paid for it again. Set `check_folder = "line"` in `praxis.toml` and the check runs in
+  `<project>-praxis/_line` instead: one git worktree on no branch for the whole project, kept between landings,
+  made to hold exactly the files being landed before each check (what git ignores stays, so your tools' caches
+  stay warm in one place). A batch is put together there and each smaller group of a failed batch is checked
+  there. An edit in any agent's folder can no longer change what was tested, so the verdict stands. A landing
+  lands your work as it was saved when the landing started: commits you save and files you change in your folder
+  after that are named when the landing ends, stay on your branch, and land with your next `praxis land`. The
+  front agent's folder never leaves its branch, so a batch stopped part-way leaves nothing there to put right, and
+  what a killed check left in the line's folder is cleared before the next check.
+  The default stays `check_folder = "agent"`, which is exactly the old behaviour, because the line's folder holds
+  only the committed files, the `share` folders and what `setup` makes there: a check that needs packages or build
+  output an agent put into its own folder by hand fails in it. `praxis check <agent>` runs your check in a folder
+  made the same way, so it tells you beforehand. The README ("Checking in the line's own folder") lists every way
+  the two can differ. No change to the database.
 - **Your check can test only what a landing changes.** For every landing's check Praxis now sets `PRAXIS_BASE` (the
   commit of the main version your work was put on top of) and `PRAXIS_CHANGED_FILES` (the path of a text file
   listing the files the landing changes, one per line, from the top of the project). Your check command can read

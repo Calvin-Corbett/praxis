@@ -62,6 +62,7 @@ class Config:
     speculate: bool = False  # start the next waiting agent's check early, while the head's check runs
     audit_every: int = 20  # about one in this many passes used from memory is run again anyway; 0: never
     checks_together: bool = True  # several named checks of one landing run at once when heavy job places are free
+    check_folder: str = "agent"  # where a landing's check runs: the agent's own folder, or "line" (see checkfolder)
 
     def check_for(self, changed: list[str]) -> tuple[str, str]:
         """(the check command, its name) for a landing that changes the files *changed*: the command of the FIRST
@@ -210,6 +211,14 @@ full_check_every = {cfg.full_check_every}
 # check; if not, the early run is stopped and forgotten. It uses more CPU to save waiting: one early check at a
 # time, and only when a heavy job place (heavy_jobs above) is free.
 speculate = {"true" if cfg.speculate else "false"}
+
+# Where a landing's check runs. "agent": in the folder of the agent that is landing (for a batch, of the agent at
+# the front), as always; nothing in that folder may change while the check runs. "line": in a folder the landing
+# line keeps for itself (<agent folders>/_line), holding exactly the files being landed. The agent can then keep
+# working while its landing is checked, and what your tools cache stays warm in that one folder. That folder holds
+# only what is committed, plus the `share` folders and what `setup` makes there: turn it on only when your check
+# passes in such a folder (`praxis check <agent>` runs it in one made the same way).
+check_folder = {_q(cfg.check_folder)}
 
 # Files a command makes from other files. Nobody claims or edits them: after each landing that changes one
 # of the `from` files, Praxis runs the command in the main folder and commits the new file, for example
@@ -438,6 +447,11 @@ def load(root: Path) -> Config:
             "praxis.toml: the full_check line holds a hidden control character (a backslash inside double quotes "
             "starts a code in TOML). Use forward slashes, or single quotes."
         )
+    if cfg.check_folder not in ("agent", "line"):
+        raise PraxisError(
+            'praxis.toml: check_folder must be "agent" (the check of a landing runs in the folder of the agent that '
+            f'is landing) or "line" (it runs in a folder the landing line keeps for itself), not {cfg.check_folder!r}.'
+        )
     if cfg.land_method not in ("rebase", "merge"):
         raise PraxisError('praxis.toml: land_method must be "rebase" or "merge".')
     _check_branch_prefix(cfg.branch_prefix)
@@ -599,7 +613,7 @@ _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": 
           "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
           "heavy_min": int, "heavy_waiting_per_agent": int,
           "generated": "tables", "checks": "tables", "full_check": str, "full_check_every": int,
-          "speculate": bool, "audit_every": int, "checks_together": bool}
+          "speculate": bool, "audit_every": int, "checks_together": bool, "check_folder": str}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
                dict: 'a table of names and text values, like { TEMP = "D:/tmp" }',

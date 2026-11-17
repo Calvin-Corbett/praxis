@@ -7,9 +7,10 @@ Steps, all while holding this agent's turn in the landing line:
    clash check for shared code files: when git cannot combine two agents' edits, nothing lands and the agent is
    told which files clash, and whose landing they clash with. Then check again what landing would really change in
    main: it must not touch asset files another agent holds.
-4. Run the project's check command in the agent's folder.
+4. Run the project's check command in the agent's folder (or, with praxis.toml's check_folder = "line", in the
+   landing line's own folder, made to hold exactly that work: see checkfolder).
 5. Only if it passes, and the folder still holds exactly the commit that was checked, move the main branch
-   forward to the agent's work. Main only ever moves forward: it never loses a commit that already landed.
+   forward to that commit. Main only ever moves forward: it never loses a commit that already landed.
 A failure at any step lands nothing and prints why. The agent's saved work is always kept (after step 3 it sits
 on top of the newest main version).
 """
@@ -121,7 +122,10 @@ def land(ctx: Ctx, name: str, finish: bool = False) -> bool:
                 elif ok and not finish:
                     ctx.say(f"When the task is finished: praxis done {name}")
             except BaseException:  # stopped half-way (Ctrl+C, a crash): undo the half-done rebase, keep the work
-                _back_on_branch(row, folder)
+                # With the check in the line's own folder the agent may be working in its folder right now: there
+                # only a git step of Praxis's own is undone, never one the agent has under way.
+                if ctx.cfg.check_folder != "line" or str(folder) in _OUR_GIT_STEP:
+                    _back_on_branch(row, folder)
                 _record_if_it_landed(ctx, row, progress)
                 raise
     if ok and finish:
@@ -200,21 +204,31 @@ def _record_landing(ctx: Ctx, row, summary: str, log: str | None, tip: str) -> N
 def _turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool = False) -> bool:
     """One agent's turn at the front of the line. With praxis.toml's `speculate`, the check of the next agent in
     line is started early while this agent's check runs (see early), and stopped again unless this work lands."""
-    from agent_praxis import early
+    from agent_praxis import checkfolder, early
 
     line = early.Line(ctx, row)
+    own = checkfolder.take(ctx, row)  # the line's own folder to check in, or None: the check runs in the agent's
     try:
-        return _take_turn(ctx, row, folder, progress, finish, line)
+        return _take_turn(ctx, row, folder, progress, finish, line, own)
     finally:
         line.stop()  # still here: the work it was built on did not land (after a landing it was let go, see keep)
+        checkfolder.give_back(own)
 
 
-def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) -> bool:
+def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line, own=None) -> bool:
+    from agent_praxis import checkfolder
+
     main, root = ctx.cfg.main_branch, ctx.repo.root
     main_ref, branch_ref = f"refs/heads/{main}", f"refs/heads/{row['branch']}"
+    checked = None
     for _ in range(RETRIES_WHEN_MAIN_MOVES):
         line.stop()  # a new try builds on a newer main: an early check built on the last try is of no use
         base = gitops.rev(root, main_ref)
+        # Checked in the line's own folder, and main moved meanwhile: the agent may have kept working in its folder.
+        stale = own.not_as_taken(folder, checked) if own is not None and checked else None
+        if stale:
+            return _fail(ctx, row, "busy-main", "the main version changed during the check, and "
+                         f"{row['name']}'s folder has changed since the landing started", stale)
         landing_changes: list[str] = []
         # Early, cheap refusal: files the agent changed that now differ from main and that someone else holds.
         early = set(gitops.changed_files(root, base, branch_ref)) & set(gitops.changed_between(root, base, branch_ref))
@@ -249,9 +263,12 @@ def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) 
         # wait_for: a check of these very files may have been started early, and still be running. before_run:
         # with `speculate`, the next agent's check starts beside this one.
         plan = checks.plan(ctx.cfg, landing_changes)
-        outcome = checks.run(ctx, row, folder, checked, plan, base=base, changed=landing_changes,
-                             wait_for=line.wait_for,
-                             before_run=lambda checked=checked: line.start(checked, [row["name"]]))
+        try:
+            outcome = checks.run(ctx, row, folder, checked, plan, base=base, changed=landing_changes,
+                                 wait_for=line.wait_for, own=own,
+                                 before_run=lambda checked=checked: line.start(checked, [row["name"]]))
+        except checkfolder.NotReady as problem:
+            return checkfolder.refuse(ctx, row, problem)
         bad, log = outcome.failed, outcome.log
         if bad is not None and bad.code == NEEDS_THE_HUMAN:
             return _needs_the_human(ctx, row, bad.output, bad.log)
@@ -289,6 +306,8 @@ def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) 
         hooks.run_after_land(ctx, row, gitops.rev(root, main_ref) or tip)
         _full_check_after(ctx, outcome.used(ctx.cfg), tip)
         _audit_after(ctx, row["name"], base, tip, outcome)
+        if own is not None:
+            own.say_what_stays(folder, checked)  # saved or edited in the agent's folder since: kept, not landed
         if not finish:
             ctx.say(f"When the task is finished: praxis done {row['name']}")
         return True
@@ -390,8 +409,18 @@ def _held_by_others(ctx: Ctx, row, changed: list[str], note: bool = False) -> li
     return lines
 
 
+_OUR_GIT_STEP: set[str] = set()  # agent folders in which a rebase or merge of Praxis's own is under way right now
+
+
 def _integrate(ctx: Ctx, row, folder: Path):
     """Put the agent's work on top of main. Returns None when that worked, else the result of a recorded failure."""
+    _OUR_GIT_STEP.add(str(folder))  # stays when this is cut short: the half-done step is then Praxis's own to undo
+    result = _put_on_top(ctx, row, folder)
+    _OUR_GIT_STEP.discard(str(folder))
+    return result
+
+
+def _put_on_top(ctx: Ctx, row, folder: Path):
     main = ctx.cfg.main_branch
     if ctx.cfg.land_method == "merge":
         args = [*gitops.identity_args(folder), "merge", "--no-edit", "-q", f"refs/heads/{main}"]

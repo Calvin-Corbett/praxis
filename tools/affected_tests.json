@@ -12,6 +12,7 @@
   "src/agent_praxis/background.py": ["tests/test_after_done.py", "tests/test_autoheavy.py", "tests/test_batch.py", "tests/test_check_changes.py", "tests/test_checkcache.py", "tests/test_claims.py", "tests/test_core_hooks.py", "tests/test_done_and_stale.py", "tests/test_early.py", "tests/test_enough.py", "tests/test_fullcheck.py", "tests/test_heavy.py", "tests/test_heavy_line.py", "tests/test_identity.py", "tests/test_locks_and_land.py", "tests/test_pathchecks.py", "tests/test_real_world.py", "tests/test_safeswitch.py", "tests/test_shared_code.py", "tests/test_speed.py", "tests/test_tests_stand_alone.py"],
   "src/agent_praxis/checkaudit.py": ["tests"],
   "src/agent_praxis/checkcache.py": ["tests/test_after_done.py", "tests/test_autoheavy.py", "tests/test_batch.py", "tests/test_check_changes.py", "tests/test_checkcache.py", "tests/test_claims.py", "tests/test_core_hooks.py", "tests/test_done_and_stale.py", "tests/test_early.py", "tests/test_enough.py", "tests/test_fullcheck.py", "tests/test_heavy.py", "tests/test_heavy_line.py", "tests/test_identity.py", "tests/test_locks_and_land.py", "tests/test_never_loses_work.py", "tests/test_pathchecks.py", "tests/test_queue.py", "tests/test_real_world.py", "tests/test_safeswitch.py", "tests/test_shared_code.py", "tests/test_shells.py", "tests/test_speed.py", "tests/test_tests_stand_alone.py"],
+  "src/agent_praxis/checkfolder.py": ["tests"],
   "src/agent_praxis/checknow.py": ["tests"],
   "src/agent_praxis/checks.py": ["tests"],
   "src/agent_praxis/config.py": ["tests"],
@@ -47,6 +48,7 @@
   "tests/test_check_changes.py": ["tests/test_check_changes.py"],
   "tests/test_check_command.py": ["tests/test_check_command.py"],
   "tests/test_checkcache.py": ["tests/test_checkcache.py"],
+  "tests/test_checkfolder.py": ["tests/test_checkfolder.py"],
   "tests/test_claims.py": ["tests/test_claims.py"],
   "tests/test_core_hooks.py": ["tests/test_after_done.py", "tests/test_check_changes.py", "tests/test_core_hooks.py"],
   "tests/test_done_and_stale.py": ["tests/test_done_and_stale.py"],
@@ -74,5 +76,5 @@
   "tests/test_tests_stand_alone.py": ["tests/test_tests_stand_alone.py"],
   "tests/test_treecpu.py": ["tests/test_treecpu.py"]
  },
- "untraced": ["tests/test_audit.py", "tests/test_check_command.py", "tests/test_formats.py", "tests/test_inputs.py", "tests/test_stopped_landing.py"]
+ "untraced": ["tests/test_audit.py", "tests/test_check_command.py", "tests/test_checkfolder.py", "tests/test_formats.py", "tests/test_inputs.py", "tests/test_stopped_landing.py"]
 }

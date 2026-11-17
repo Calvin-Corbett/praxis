@@ -2,7 +2,9 @@
 
 The agent at the front (the head) takes the agents behind it that are ready, up to `batch_max` in all. In its own
 folder, on a detached HEAD (its branch is never touched), it puts each agent's saved commits on top of the newest main
-version in line order, so one candidate holds everyone's work. The check runs ONCE on that candidate. If it passes,
+version in line order, so one candidate holds everyone's work. (With praxis.toml's check_folder = "line" all of that
+happens in the landing line's own folder instead, and the head's folder stays as it is: see checkfolder.)
+The check runs ONCE on that candidate. If it passes,
 main moves forward to the candidate (every agent's commits, in line order) and each agent is told it landed. If it
 fails, the batch is cut in half and each half is checked on top of the newest main (group testing): halves that pass
 land, the one agent left alone in a failing group is refused with the check's output, and everyone else carries on.
@@ -421,10 +423,14 @@ def _fail_claims(ctx: Ctx, row, clashes: list[str]) -> bool:
 
 
 class _Run:
-    """One batch in progress, in the head's folder."""
+    """One batch in progress: in the head's folder, or with check_folder = "line" in the line's own folder."""
 
     def __init__(self, ctx: Ctx, head: Member, folder: Path, marker: dict, finish: bool):
-        self.ctx, self.head, self.folder, self.marker, self.finish = ctx, head, folder, marker, finish
+        from agent_praxis import checkfolder
+
+        self.ctx, self.head, self.home, self.marker, self.finish = ctx, head, folder, marker, finish
+        self.own = checkfolder.take(ctx, head.row)  # the line's own folder, or None
+        self.folder = folder if self.own is None else self.own.path  # where candidates are built and checked
         self.root = ctx.repo.root
         self.main_ref = f"refs/heads/{ctx.cfg.main_branch}"
         self.failed: dict[str, tuple[int, str, str]] = {}  # candidate tree -> (check exit code, output, log): it failed
@@ -445,7 +451,10 @@ class _Run:
         from agent_praxis import landing as L
 
         folder = self.folder
-        gitops.git(["checkout", "-q", "--detach", base], folder)
+        if self.own is None:
+            gitops.git(["checkout", "-q", "--detach", base], folder)
+        else:
+            self._held(lambda: self.own.hold(base))
         built: list[Member] = []
         for m in group:
             if m.outcome is not None:
@@ -492,6 +501,18 @@ class _Run:
             _save_marker(self.ctx, self.marker)
         return built
 
+    def _held(self, step):
+        """Do *step*, which needs the line's own folder to hold a commit. When the folder cannot be made ready,
+        nobody is judged: the head is told why, and the others land on their own turn."""
+        from agent_praxis import checkfolder
+
+        try:
+            return step()
+        except checkfolder.NotReady as problem:
+            checkfolder.refuse(self.ctx, self.head.row, problem, settled=self.head.outcome is not None)
+            self.head.outcome = self.head.outcome or "refused"
+            raise Abort from None
+
     def _leave_out(self, m: Member) -> None:
         m.outcome = "left-out"
         if m is not self.head:
@@ -525,8 +546,9 @@ class _Run:
             return 0, "", None
         checked, names = gitops.rev(folder, "HEAD"), [m.name for m in built]
         # before_run: with `speculate`, the next agent's check starts beside this one
-        outcome = checks.run(ctx, self.head.row, folder, checked, plan, base=base, changed=changed, batch=names,
-                             before_run=lambda: self.line.start(checked, names))
+        outcome = self._held(lambda: checks.run(
+            ctx, self.head.row, folder, checked, plan, base=base, changed=changed, batch=names, own=self.own,
+            before_run=lambda: self.line.start(checked, names)))
         self.used, self.outcome = outcome.used(ctx.cfg), outcome
         bad = outcome.failed
         if bad is not None:
@@ -542,6 +564,8 @@ class _Run:
                     "that check does not count: they land on their own turn."
                     + "".join(f"\n{line}" for line in files)
                     + f"\n{self.head.name}'s own result stands. Do not change the folder while a landing runs."
+                    if self.own is None
+                    else self.own.does_not_count(self.head.name, names, files)
                 )
                 raise Abort
             L._fail(ctx, self.head.row, "changed-during-check", "files changed while the check ran", outcome.moved)
@@ -700,12 +724,16 @@ class _Run:
     def close(self, quiet: bool = False) -> None:
         """Put the head's folder back on its branch (and level with main when its work landed). The marker goes
         once that is done; if it cannot be done, it stays, and the head's next landing does it."""
-        ctx, folder, head = self.ctx, self.folder, self.head
+        from agent_praxis import checkfolder
+
+        ctx, folder, head = self.ctx, self.home, self.head
         self.line.stop()  # still here: the candidate it was built on did not land
+        checkfolder.give_back(self.own)  # the line's own folder stays as it is: the next landing makes it its own
         branch = head.row["branch"]
-        if gitops.operation_in_progress(folder):
+        mine = self.own is None  # the batch was in the head's folder (else that folder is the agent's alone)
+        if mine and gitops.operation_in_progress(folder):
             gitops.abort_operation(folder)
-        if gitops.current_branch(folder) != branch:
+        if mine and gitops.current_branch(folder) != branch:
             # A commit made in the folder while the batch ran (the agent kept working) is carried onto the branch.
             result = put_back(ctx, head.row, folder, self.marker)
             if not result.ok:
@@ -715,7 +743,9 @@ class _Run:
             if result.carried:
                 _say_put_back(ctx, head.row, result, stopped=False)
         if head.outcome == "landed" and head.landed_at:
-            catch_up(ctx, head.row, folder, head.tip, head.landed_at, quiet=quiet)
+            level = catch_up(ctx, head.row, folder, head.tip, head.landed_at, quiet=quiet)
+            if self.own is not None and not level and not quiet:
+                self.own.say_what_stays(folder, head.tip)  # the head kept working while the batch was checked
         if not self.marker.get("landing") or self.marker.get("recorded"):
             _drop_marker(ctx, head.name)
 
