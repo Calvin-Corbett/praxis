@@ -21,6 +21,7 @@ import locale
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -594,6 +595,19 @@ def _back_on_branch(row, folder: Path) -> None:
 
 _KILL_ON_CLOSE, _BREAKAWAY_OK = 0x2000, 0x800
 
+# The parent sends the check command only after Windows has put this process in the job. If the parent
+# dies first, the pipe closes and this process exits without starting anything, even after a partial write.
+_WINDOWS_CHECK_LAUNCHER = """\
+import sys
+received = sys.stdin.buffer.read()
+if not received.endswith(b'\\0'):
+    sys.exit(3)
+import subprocess
+code = subprocess.call(received[:-1].decode('utf-8', 'surrogatepass'), shell=True, stdin=subprocess.DEVNULL)
+# Windows gives Popen an unsigned DWORD; sys.exit takes a signed C int. Keep the same 32 bits.
+sys.exit(code if code < 2**31 else code - 2**32)
+"""
+
 
 class _CheckEndsWithMe:
     """On Windows, put the check (and what it starts) in a job of its own that Windows ends if this process is
@@ -634,7 +648,7 @@ class _CheckEndsWithMe:
             k32.CloseHandle.argtypes = [wintypes.HANDLE]
             job = k32.CreateJobObjectW(None, None)
             if not job:
-                return
+                raise ctypes.WinError(ctypes.get_last_error())
             info = Extended()
 
             def limit(flags: int) -> bool:
@@ -644,9 +658,12 @@ class _CheckEndsWithMe:
             if limit(_KILL_ON_CLOSE | _BREAKAWAY_OK) and k32.AssignProcessToJobObject(job, int(proc._handle)):
                 self.job, self._limit, self._close = job, limit, k32.CloseHandle
             else:
+                error = ctypes.WinError(ctypes.get_last_error())
                 k32.CloseHandle(job)
-        except (OSError, AttributeError, ValueError):
-            return  # an older Windows: carry on without it
+                raise error
+        except (OSError, AttributeError, ValueError) as exc:
+            raise PraxisError(f"Windows could not attach the project check to this landing's job ({exc}). "
+                              "The check did not start.") from exc
 
     def stop(self) -> None:
         """Stop the check and everything it started (closing the job while its limit is on ends them all)."""
@@ -721,10 +738,21 @@ def _run_check(ctx: Ctx, row, folder: Path, command: str, base: str | None = Non
         # No time limit, on purpose. No keyboard either: a check that waits for a key (`pause`) would hold the
         # landing line forever. The output goes straight to the log, so a huge output never fills memory.
         guard = _CheckEndsWithMe()
-        proc = subprocess.Popen(plan.command, shell=True, cwd=str(folder), env=env,
-                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+        options = {"cwd": str(folder), "env": env, "stdout": out, "stderr": subprocess.STDOUT}
+        if os.name == "nt":
+            # A venv's python.exe may itself spawn the interpreter. Assign the real interpreter, before it
+            # receives any command. -I -S keeps project files and startup hooks out of this handshake.
+            python = getattr(sys, "_base_executable", None) or sys.executable
+            hidden = subprocess.STARTUPINFO(dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=subprocess.SW_HIDE)
+            proc = subprocess.Popen([python, "-I", "-S", "-c", _WINDOWS_CHECK_LAUNCHER],
+                                    stdin=subprocess.PIPE, startupinfo=hidden, **options)
+        else:
+            proc = subprocess.Popen(plan.command, shell=True, stdin=subprocess.DEVNULL, **options)
         try:
-            guard.watch(proc)
+            if proc.stdin is not None:
+                with proc.stdin:
+                    guard.watch(proc)
+                    proc.stdin.write(plan.command.encode("utf-8", "surrogatepass") + b"\0")
             _wait_saying_so(ctx, proc, log)
         except BaseException:  # stopped (Ctrl+C): stop the check and what it started, then report it
             guard.stop()

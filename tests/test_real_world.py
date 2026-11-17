@@ -652,6 +652,44 @@ def test_a_detached_folder_with_the_same_files_as_its_branch_is_put_back_not_cal
     assert git(wt, "symbolic-ref", "--short", "HEAD") == "praxis/alice"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows checks wait for their job before starting")
+def test_a_landing_stopped_before_its_job_is_ready_starts_no_project_command(project, monkeypatch):
+    from agent_praxis import landing
+    from agent_praxis.errors import PraxisError
+
+    started = project.parent / "check-started"
+    (project / "mark.py").write_text(f"from pathlib import Path\nPath({str(started)!r}).touch()\n")
+    _set_check(project, "mark.py")
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    edit(folder(project, "alice") / "scripts" / "player.gd", "extends Node\nvar speed = 11\n")
+    before = git(project, "rev-parse", "main")
+
+    def lose_parent_before_assignment(self, proc):
+        # Losing the parent's pipe models its death at the precise point between process creation and assignment.
+        if proc.stdin is not None:
+            proc.stdin.close()
+        proc.wait(timeout=30)
+        raise PraxisError("Stopped before job assignment.")
+
+    monkeypatch.setattr(landing._CheckEndsWithMe, "watch", lose_parent_before_assignment)
+    code, out = praxis("land", "alice")
+    assert code != 0 and "Stopped before job assignment" in out, out
+    assert not started.exists()
+    assert git(project, "rev-parse", "main") == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows exit codes use all 32 bits")
+def test_a_check_keeps_its_full_windows_exit_code_in_the_log(project):
+    (project / "exitcode.py").write_text("import sys\nsys.exit(-2147483645)\n")
+    _set_check(project, "exitcode.py")
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    edit(folder(project, "alice") / "scripts" / "player.gd", "extends Node\nvar speed = 11\n")
+    code, out = praxis("land", "alice")
+    assert code == 2, out
+    logs = (project / ".git" / "praxis" / "logs").glob("alice-*.log")
+    assert any("(exit code 2147483651)" in log.read_text() for log in logs)
+
+
 def test_a_helper_the_check_leaves_running_survives_a_normal_landing(project):
     beat = project.parent / "helper-beat.txt"
     helper = f"import time, pathlib; time.sleep(4); pathlib.Path({str(beat)!r}).write_text('alive')"
