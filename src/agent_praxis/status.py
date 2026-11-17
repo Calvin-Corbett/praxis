@@ -49,13 +49,7 @@ def render(ctx: Ctx) -> str:
     if here:
         out.append(f"You are in {here}'s folder. The main project folder is {ctx.repo.root}")
     out.append("")
-    if store.held_back:
-        out.append(f"OLDER PRAXIS COMMANDS ARE STILL RUNNING HERE: {live.listed(store.older)}.")
-        out.append("  This newer Praxis left the project's database as it is and shows what it holds. It takes over "
-                   "when they finish.")
-        out.append("  Until then a command that needs the newer database (`praxis land`) says so and changes nothing: "
-                   "run it again when they have finished.")
-        out.append("")
+    out += _older_lines(store)
 
     looks = look_at_agents(ctx, agents)  # every agent's folder read once, in a few threads
     paused = [a for a in agents if a["paused"]]
@@ -209,6 +203,27 @@ def _stopped_landings(ctx, agents, looks) -> list[str]:
         out.append("      (it puts the folder back with everything saved in it, lands what has not landed, and says "
                    "so when the work already landed)")
     return out
+
+
+def _older_lines(store) -> list[str]:
+    """The commands of an older Praxis still running in the project, and what that means for them and for you:
+    said for as long as one of them lives, also after the database was brought up to this Praxis's format."""
+    older = store.older_now()
+    if not older:
+        return []
+    out = [f"OLDER PRAXIS COMMANDS ARE STILL RUNNING HERE: {live.listed(older)}."]
+    if store.held_back:
+        out.append("  This newer Praxis left the project's database as it is and shows what it holds. It takes over "
+                   "when they finish.")
+        out.append("  Until then a command that needs the newer database (`praxis land`) says so and changes nothing: "
+                   "run it again when they have finished.")
+    else:
+        out.append("  The project's database is already at this newer Praxis's format; they started before that. "
+                   "A heavy job among them runs to its end and ends with its own exit code.")
+        out.append("  A landing among them can fail: when its check starts a `praxis` command with that older "
+                   "Praxis, the newer database refuses it. Its work is kept: land it again with this Praxis.")
+        out.append("  Any new command of that older Praxis is refused and changes nothing (it says: update Praxis).")
+    return [*out, ""]
 
 
 def _checks_lines(ctx) -> list[str]:

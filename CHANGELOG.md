@@ -177,6 +177,25 @@
   back by hand. It now says the agent is already landing, and changes nothing.
 
 ### Changed
+- **A background landing no longer makes the commands under it run its own Praxis version.** `praxis land
+  --background` (and the full check, an early check and an audit, which Praxis also starts in the background) put
+  the folder of its own install into `PYTHONPATH`. Your check inherited that, so every `praxis` the check started
+  ran the lander's version, even through the launcher after you had switched it to a newer one. After an update
+  those calls were refused ("this Praxis knows format 4") and the landing failed with "the check failed". Praxis now
+  starts its background processes with its own Python by full path and leaves the environment exactly as your
+  command had it: a `praxis` your check starts is the one your PATH or the launcher names at that moment.
+- **`--upgrade-now` refuses while a landing of an older Praxis is still running.** Taking a project over under an
+  older `praxis land` made that landing's check fail, and every agent in its batch was told its work failed (no
+  work was lost, but all of them had to land again). Now `--upgrade-now` exits with code 1, changes nothing, names
+  those landings and tells you to wait for them, or to stop them and land them again with the newer Praxis
+  afterwards. It still takes over when all that is left of the older Praxis are heavy jobs: those carry on and end
+  with their own exit code. To take over regardless, add the new `--even-with-older-landings`.
+- **`praxis status` keeps naming the commands of an older Praxis after the takeover.** Once the database was
+  brought up to date, the line about older commands disappeared although they were still running. Now status names
+  them, and says what they can and cannot do, until the last one has ended.
+- **The file a killed Praxis command leaves behind is removed as soon as it is seen.** A killed command cannot
+  remove its file in `.git/praxis/procs/`, and Praxis used to clear such files only when a newer Praxis was
+  deciding whether to take over, or once more than 200 had piled up. Now `praxis status` removes them every time.
 - **On Windows, `bash` in your commands means Git Bash, not WSL.** A check, `setup`, `after_land`, `after_done` or
   `generated` command, or a `praxis run --heavy` command, that started with a bare `bash` or `sh` ran
   `C:\Windows\System32\bash.exe`. That is WSL (Linux inside Windows), which cannot see Windows paths: your script

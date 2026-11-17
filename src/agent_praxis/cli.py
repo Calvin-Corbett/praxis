@@ -44,7 +44,8 @@ When things go wrong:
 
 A newer Praxis does not take a project over while commands of an older Praxis are still running in it: it works with
 the project as it is where it can, or says who is still running and changes nothing. Add --upgrade-now to any command
-to take over at once.
+to take over at once: that goes ahead when only heavy jobs of the older Praxis are left (they finish normally), and
+refuses while one of its landings is still running (its check would fail), unless you add --even-with-older-landings.
 
 Exit codes: 0 done, 1 refused (the message says why; nothing was changed), 2 not landed or a step failed (the
 message says why; work is kept), 3 Praxis hit a problem it did not expect, 130 stopped with Ctrl+C.
@@ -73,8 +74,11 @@ USES = {
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="praxis", description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
-    upgrade_help = "take this project over at once, even while commands of an older Praxis are still running in it"
+    upgrade_help = ("take this project over at once, even while heavy jobs of an older Praxis are still running in it "
+                    "(refused while a landing of an older Praxis is running)")
+    even_help = "with --upgrade-now: take over even while a landing of an older Praxis is running (its check may fail)"
     p.add_argument("--upgrade-now", action="store_true", help=upgrade_help)
+    p.add_argument("--even-with-older-landings", action="store_true", help=even_help)
     sub = p.add_subparsers(dest="command", metavar="command")
 
     s = sub.add_parser("init", help="set this project up for Praxis")
@@ -157,6 +161,8 @@ def _parser() -> argparse.ArgumentParser:
         if name not in ("init", "launcher"):  # the two that never open the project's database
             # SUPPRESS: given before the command (`praxis --upgrade-now status`) it is not reset by the command's own.
             s.add_argument("--upgrade-now", action="store_true", default=argparse.SUPPRESS, help=upgrade_help)
+            s.add_argument("--even-with-older-landings", action="store_true", default=argparse.SUPPRESS,
+                           help=even_help)
     return p
 
 
@@ -165,13 +171,15 @@ def _ctx(args=None, argv: tuple | list = ()) -> tuple[Ctx, Store]:
     repo = gitops.find_repo()
     cfg = config.load(repo.root)
     doing = " ".join(("praxis " + " ".join(argv)).split())[:200]  # for the register of live commands (live.py)
-    store = Store(repo.state_dir, upgrade_now=bool(args and args.upgrade_now), command=doing)
+    store = Store(repo.state_dir, upgrade_now=bool(args and args.upgrade_now), command=doing,
+                  even_landings=bool(args and args.even_with_older_landings))
     try:
         # Refuses, changing nothing, while commands of an older Praxis must be waited for.
         store.need(USES.get(args.command) if args else None)
         if store.older and not store.held_back:
             _say("Took this project over (--upgrade-now) while commands of an older Praxis were still running in it: "
-                 f"{live.listed(store.older)}. They may stop with an error; run them again with this Praxis.")
+                 f"{live.listed(store.older)}. Its heavy jobs finish normally. Any other of its commands may stop "
+                 "with an error: run that one again with this Praxis.")
         for row in store.agents():  # git hooks in an agent's folder can tell which agent is committing
             gitops.agent_folder(row["worktree"], row["name"], row["task"])
     except BaseException:

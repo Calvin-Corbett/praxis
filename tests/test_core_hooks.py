@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import edit, folder, git, praxis
+from conftest import CHILD_GUARD, edit, folder, git, praxis
 
 from agent_praxis import gitops
 
@@ -107,6 +107,67 @@ def test_the_background_landing_leaves_the_callers_job_or_says_it_could_not(monk
     assert calls[0] & background._BREAKAWAY and calls[0] & background._NO_WINDOW
     assert not calls[1] & background._BREAKAWAY and calls[1] & background._NO_WINDOW
     assert not any(c & 0x8 for c in calls)  # never DETACHED_PROCESS: its children would open windows
+
+
+def test_a_praxis_child_is_started_by_full_path_with_the_callers_own_environment(monkeypatch):
+    """Nothing naming this Praxis's install goes into the environment: every command beneath the child inherits it,
+    and a `praxis` started there must be the one the PATH (the launcher) names, not this version."""
+    from agent_praxis import background
+    seen = {}
+
+    def fake_popen(args, env=None, **kw):
+        seen.update(args=args, env=env)
+        return "started"
+
+    monkeypatch.setattr(background.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("PYTHONPATH", "what the person set")
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    background._spawn([sys.executable, "-m", "agent_praxis", "land", "alice", "--in-background"], None)
+    assert seen["env"] == dict(os.environ) and seen["env"]["PYTHONPATH"] == "what the person set"
+    args = seen["args"]
+    assert args[0] == sys.executable and os.path.isabs(args[0]) and "-m" not in args
+    assert args[-3:] == ["land", "alice", "--in-background"]
+    assert Path(args[args.index("-c") + 2]) == Path(background.__file__).resolve().parents[1], "where this Praxis is"
+
+
+def test_a_check_under_a_background_landing_finds_praxis_the_way_you_would(project, tmp_path, monkeypatch):
+    """The check calls `praxis`. Under a background landing that must be the Praxis first on the PATH (in real use:
+    the launcher, which may run a newer version by now), running its own code and not the lander's."""
+    other = tmp_path / "another install"
+    (other / "agent_praxis").mkdir(parents=True)
+    (other / "agent_praxis" / "__init__.py").write_text("")
+    seen = tmp_path / "seen.json"
+    # Stands in for another installed Praxis: its Python finds its own agent_praxis last of all, the way an
+    # interpreter finds its own site-packages after everything PYTHONPATH names (-S: and nothing installed here).
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import json, os, sys\n"
+        f"sys.path.append({str(other)!r})\n"
+        "import agent_praxis\n"
+        f"with open({str(seen)!r}, 'w', encoding='utf-8') as out:\n"
+        "    json.dump({'praxis': agent_praxis.__file__, 'pythonpath': os.environ.get('PYTHONPATH'),\n"
+        "               'args': sys.argv[1:]}, out)\n",
+        encoding="utf-8",
+    )
+    on_path = tmp_path / "on the path"
+    on_path.mkdir()
+    if os.name == "nt":
+        (on_path / "praxis.cmd").write_text(f'@"{sys.executable}" -S "{probe}" %*\r\n', encoding="utf-8")
+    else:
+        _sh(on_path / "praxis", f'exec "{sys.executable}" -S "{probe}" "$@"\n')
+    monkeypatch.setenv("PATH", str(on_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PYTHONPATH", str(CHILD_GUARD))  # as with an installed Praxis: nothing here names its code
+    _set(project, "check", "'praxis run --heavy the-tests'")
+    praxis("start", "alice", "jump", "scripts/player.gd")
+    edit(folder(project, "alice") / "scripts" / "player.gd", "extends Node\nvar speed = 12\n")
+    code, out = praxis("land", "alice", "--background")
+    assert code == 0, out
+    code, out = praxis("wait", "alice")
+    assert code == 0 and "Landed" in out, out
+    found = json.loads(seen.read_text(encoding="utf-8"))
+    assert found["args"] == ["run", "--heavy", "the-tests"]
+    assert Path(found["praxis"]).parent.parent == other, "the PATH's Praxis ran its own code, not the lander's"
+    assert found["pythonpath"] == str(CHILD_GUARD), "the lander put nothing of itself into the environment"
 
 
 # 2. after_land, 11. env ------------------------------------------------------------------------------------------

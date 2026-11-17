@@ -66,14 +66,24 @@ def start(ctx: Ctx, name: str, finish: bool = False) -> int:
     return 0
 
 
+# What a child process runs to be this same Praxis: the folder this Praxis was loaded from is handed over as an
+# argument and put first on the child's own module path. Nothing about it goes into the environment (see _spawn).
+_THIS_PRAXIS = "import sys; sys.path.insert(0, sys.argv.pop(1)); from agent_praxis.cli import main; sys.exit(main())"
+
+
 def _spawn(args: list[str], out, cwd: Path | str | None = None) -> tuple[subprocess.Popen, bool]:
     """Start *args* with no keyboard, no window, and nothing tying it to this process. (process, fully independent)
-    It starts in *cwd*, or in the folder this process is in."""
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    here = str(Path(__file__).resolve().parents[1])  # the same Praxis as this one, wherever it was installed
-    env["PYTHONPATH"] = here + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    kw = {"cwd": str(cwd) if cwd else os.getcwd(), "env": env, "stdin": subprocess.DEVNULL, "stdout": out, "stderr": subprocess.STDOUT}
+    It starts in *cwd*, or in the folder this process is in.
+
+    The child gets the environment this process has, unchanged, because the check and every command beneath it
+    inherit it. A PYTHONPATH naming this Praxis's install would make every `praxis` those commands start run this
+    version's code, whichever version the launcher or the PATH names: after an update that is the wrong one. So
+    `python -m agent_praxis ...` is started as this interpreter, by its full path, told where this Praxis is."""
+    if args[1:3] == ["-m", "agent_praxis"]:
+        here = str(Path(__file__).resolve().parents[1])  # the same Praxis as this one, wherever it was installed
+        args = [args[0], "-u", "-c", _THIS_PRAXIS, here, *args[3:]]  # -u: its log shows each line as it is printed
+    kw = {"cwd": str(cwd) if cwd else os.getcwd(), "env": dict(os.environ), "stdin": subprocess.DEVNULL,
+          "stdout": out, "stderr": subprocess.STDOUT}
     if os.name != "nt":
         return subprocess.Popen(args, start_new_session=True, **kw), True
     flags = _NEW_PROCESS_GROUP | _NO_WINDOW

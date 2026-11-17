@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import types
@@ -170,15 +171,43 @@ def test_files_of_killed_commands_do_not_pile_up(project, monkeypatch):
     assert list(procs.glob("*.lock")) == []
 
 
-def test_a_dead_process_is_not_running_and_its_file_is_swept_later(project):
+def _pid_of_a_process_that_ended() -> int:
+    done = subprocess.Popen([sys.executable, "-c", "pass"])
+    done.wait()
+    return done.pid
+
+
+def test_the_file_a_killed_command_left_is_removed_as_soon_as_it_is_seen(project):
     procs = state(project) / "procs"
-    dead = older_registered(project)
-    let_go(dead)  # the process died: the operating system freed its lock, the file is still there
+    let_go(older_registered(project, pid=_pid_of_a_process_that_ended()))  # killed: its lock is free, its file stays
     left = next(iter(procs.glob("*.lock")))
-    assert live.running(state(project)) == [] and left.exists(), "a young file may belong to a command just starting"
-    long_ago = time.time() - 10 * live.SWEEP_AFTER_SECONDS
-    os.utime(left, (long_ago, long_ago))
-    assert live.running(state(project)) == [] and not left.exists()
+    assert left.exists()
+    assert live.running(state(project)) == [] and not left.exists(), "no waiting for the file to grow old"
+
+
+def test_status_removes_the_file_a_killed_command_left(project):
+    procs = state(project) / "procs"
+    let_go(older_registered(project, pid=_pid_of_a_process_that_ended()))
+    assert len(list(procs.glob("*.lock"))) == 1
+    code, out = praxis("status")
+    assert code == 0 and "OLDER PRAXIS" not in out, out
+    assert list(procs.glob("*.lock")) == []
+
+
+def test_the_file_of_a_command_that_is_just_starting_is_left_alone(project):
+    """A starting command has made its file and not locked it yet: it must find it again."""
+    procs = state(project) / "procs"
+    procs.mkdir(parents=True, exist_ok=True)
+    young = procs / f"{os.getpid()}-{uuid.uuid4().hex[:12]}.lock"
+    starting = open(young, "a+b")  # noqa: SIM115 - what register() has done before it takes the lock
+    try:
+        assert live.running(state(project)) == [] and young.exists()
+    finally:
+        starting.close()
+    if os.name != "nt":  # the process is alive and the file is not locked: only its age can say it was left behind
+        long_ago = time.time() - 10 * live.SWEEP_AFTER_SECONDS
+        os.utime(young, (long_ago, long_ago))
+    assert live.running(state(project)) == [] and not young.exists()
 
 
 # --- no upgrade under live older commands ---------------------------------------------------------------------------
@@ -258,16 +287,108 @@ def test_an_older_heavy_job_keeps_the_database_as_it_is(alice):
 
 
 @pytest.mark.parametrize("args", [("status", "--upgrade-now"), ("--upgrade-now", "status")])
-def test_upgrade_now_takes_over_anyway(alice, args):
+def test_upgrade_now_takes_over_under_older_heavy_jobs(alice, args):
     downgrade(alice)
-    ghost = older_registered(alice)
+    ghost = older_registered(alice, "praxis run --heavy pytest -q")
+    old = older_heavy_job(alice, "bob", "npm test", pid=777)
     try:
         code, out = praxis(*args)
         assert code == 0, out
-        assert "Took this project over (--upgrade-now)" in out and "praxis land ghost" in out
+        assert "Took this project over (--upgrade-now)" in out and "praxis run --heavy pytest -q" in out
+        assert "praxis run --heavy npm test" in out and "heavy jobs finish normally" in out
         assert db_format(alice) == store.FORMAT and tables(alice) >= NEWEST
     finally:
         let_go(ghost)
+        let_go(old)
+
+
+def _older_lander(project: Path, kind: str):
+    """A landing of an older Praxis: one that registered, or one from before the register (its ticket is all)."""
+    if kind == "registered":
+        return older_registered(project, "praxis land ghost", pid=4242), "praxis land ghost (pid 4242, Praxis 0.3.0)"
+    return older_landing(project, "bob")[0], "praxis land bob (an older Praxis, pid not known)"
+
+
+@pytest.mark.parametrize("kind", ["registered", "from before the register"])
+@pytest.mark.parametrize("args", [("status", "--upgrade-now"), ("--upgrade-now", "land", "alice")])
+def test_upgrade_now_refuses_while_an_older_landing_is_running(alice, kind, args):
+    downgrade(alice)
+    ghost, named = _older_lander(alice, kind)
+    heavy = older_heavy_job(alice, "carol", "pytest -q", pid=777)
+    try:
+        code, out = praxis(*args)
+        assert code == 1, out
+        assert "Did not take this project over (--upgrade-now)" in out and named in out
+        assert "stop them and land them again with this Praxis afterwards" in out and "Nothing was changed." in out
+        assert "--even-with-older-landings" in out
+        assert "praxis run --heavy pytest -q" not in out, "the heavy job is not what stops it"
+        assert db_format(alice) == BEHIND and not NEWEST & tables(alice)
+        assert git(alice, "log", "--format=%s", "main").count("alice") == 0, "nothing landed"
+        left = [live.read_stamp(path)["pid"] for path in (state(alice) / "procs").glob("*.lock")]
+        assert left == ([4242] if kind == "registered" else []), "the refused command left the register clean"
+    finally:
+        let_go(ghost)
+        let_go(heavy)
+
+
+def test_upgrade_now_refuses_under_any_older_command_that_is_not_a_heavy_job(alice):
+    downgrade(alice)
+    ghost = older_registered(alice, "praxis fullcheck --in-background", pid=31)
+    try:
+        code, out = praxis("status", "--upgrade-now")
+        assert code == 1 and "Other commands of an older Praxis are still running" in out, out
+        assert "praxis fullcheck --in-background (pid 31" in out and "wait for them to end" in out
+        assert db_format(alice) == BEHIND
+    finally:
+        let_go(ghost)
+
+
+@pytest.mark.parametrize("args", [("status", "--upgrade-now", "--even-with-older-landings"),
+                                  ("--even-with-older-landings", "--upgrade-now", "status")])
+def test_upgrade_now_takes_over_under_an_older_landing_when_told_twice(alice, args):
+    downgrade(alice)
+    ghost, named = _older_lander(alice, "registered")
+    try:
+        code, out = praxis(*args)
+        assert code == 0, out
+        assert "Took this project over (--upgrade-now)" in out and named in out
+        assert db_format(alice) == store.FORMAT and tables(alice) >= NEWEST
+    finally:
+        let_go(ghost)
+
+
+def test_the_second_flag_alone_takes_nothing_over(alice):
+    downgrade(alice)
+    ghost, _named = _older_lander(alice, "registered")
+    try:
+        code, out = praxis("status", "--even-with-older-landings")
+        assert code == 0 and "OLDER PRAXIS COMMANDS ARE STILL RUNNING" in out, out
+        assert db_format(alice) == BEHIND
+    finally:
+        let_go(ghost)
+
+
+def test_status_keeps_naming_older_commands_after_the_takeover(alice):
+    """Taking over does not end the older commands: status says they are there until the last one has ended."""
+    downgrade(alice)
+    ghost = older_registered(alice, "praxis run --heavy pytest -q", pid=4242)
+    old = older_heavy_job(alice, "bob", "npm test", pid=777)
+    try:
+        code, out = praxis("status", "--upgrade-now")
+        assert code == 0 and db_format(alice) == store.FORMAT, out
+        for _again in range(2):
+            code, out = praxis("status")
+            assert code == 0, out
+            assert "OLDER PRAXIS COMMANDS ARE STILL RUNNING HERE" in out
+            assert "praxis run --heavy pytest -q (pid 4242, Praxis 0.3.0)" in out
+            assert "praxis run --heavy npm test (an older Praxis, by bob, its job is pid 777)" in out
+            assert "already at this newer Praxis's format" in out and "ends with its own exit code" in out
+            assert "It takes over when they finish" not in out, "it has taken over already"
+    finally:
+        let_go(ghost)
+        let_go(old)
+    code, out = praxis("status")
+    assert code == 0 and "OLDER PRAXIS" not in out, out
 
 
 def test_commands_that_only_use_the_older_tables_carry_on_without_upgrading(alice):

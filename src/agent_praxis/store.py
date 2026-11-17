@@ -181,9 +181,10 @@ def added_in(table: str) -> int:
 
 
 class Store:
-    def __init__(self, state_dir: Path, upgrade_now: bool = False, command: str = ""):
+    def __init__(self, state_dir: Path, upgrade_now: bool = False, command: str = "", even_landings: bool = False):
         """*command* is what this process is doing, in words for a person (live.py keeps it while the Store is open).
-        *upgrade_now* brings the database up to FORMAT even while commands of an older Praxis are still running."""
+        *upgrade_now* brings the database up to FORMAT even while heavy jobs of an older Praxis are still running;
+        while a landing (or anything else) of an older Praxis runs it refuses, unless *even_landings*."""
         self.dir = state_dir
         self.dir.mkdir(parents=True, exist_ok=True)
         self.format = 0  # the format the database is at, as far as this Store knows
@@ -199,7 +200,7 @@ class Store:
             self.format = self._format()
             self._refuse_newer(self.format)
             if self.format < FORMAT:
-                self._upgrade(upgrade_now)
+                self._upgrade(upgrade_now, even_landings)
         except BaseException:
             self.close()
             raise
@@ -215,7 +216,7 @@ class Store:
                 "older. Update Praxis (or use the newer one) for this project. Nothing was changed."
             )
 
-    def _upgrade(self, now: bool = False) -> None:
+    def _upgrade(self, now: bool = False, even_landings: bool = False) -> None:
         """Bring a new or older database up to FORMAT, all in one transaction: another process upgrading at the same
         moment waits, then finds nothing left to do.
 
@@ -223,6 +224,9 @@ class Store:
         format when they started and would carry on in a database they do not know. Then the database is left as it
         is, and `older` says who they are. The transaction holds the whole database (readers too), so no command can
         read the old format while this one decides.
+
+        Even with *now* it refuses, changing nothing, while a landing of an older Praxis runs (live.no_takeover says
+        why), unless *even_landings*.
         """
         with self.write(exclusive=True) as db:
             found = int(db.execute("PRAGMA user_version").fetchone()[0])
@@ -232,16 +236,27 @@ class Store:
                 return
             in_use = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'").fetchone()
             if in_use:  # a brand-new database has nobody to take it from
-                self.older = live.older_commands(self.dir, db, FORMAT, self._registration[0])
+                running = live.older(self.dir, db, FORMAT, self._registration[0])
+                self.older = [words for _kind, words in running]
                 if self.older and not now:
                     self.held_back = True
                     return
+                refused = None if even_landings else live.no_takeover(running)
+                if refused:
+                    raise PraxisError(refused)
             steps = [SCHEMA] + [UPGRADES[n] for n in range(max(found, 1) + 1, FORMAT + 1)]
             for script in steps:
                 for statement in _statements(script):
                     _apply(db, statement)
             db.execute(f"PRAGMA user_version = {FORMAT}")
             self.format = FORMAT
+
+    def older_now(self) -> list[str]:
+        """The commands of an older Praxis that are running in the project at this moment (live.older_commands),
+        whether or not the database was brought up to this Praxis's format under them."""
+        if self.held_back:
+            return self.older
+        return live.older_commands(self.dir, self.conn, FORMAT, self._registration[0])
 
     def stamp(self, handle, **more) -> None:
         """Write who holds a brand-new lock file (a landing-line ticket, a heavy job) into it, BEFORE it is locked. A

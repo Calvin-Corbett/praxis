@@ -215,7 +215,8 @@ Use a different name for each agent (`claude-1`, `claude-2`, `codex-1`...).
 | `praxis trust <check>` | Remember a named check's passes again, after its audit failed (see "Named checks"). |
 | `praxis launcher` | Write `~/.praxis/bin/praxis`, a launcher at a fixed path, and register this Praxis with it. It keeps running the version it runs now; `--switch` points it at the newest installed Praxis. |
 
-Every command that works in a project also takes `--upgrade-now` (see "Several versions of Praxis").
+Every command that works in a project also takes `--upgrade-now` and `--even-with-older-landings` (see "Several
+versions of Praxis").
 
 `praxis start` refuses a branch with the agent's name that Praxis did not make (it may be someone's work). Add
 `--reuse-branch` to carry on from it on purpose.
@@ -264,6 +265,11 @@ command (or the tool's shell) that started it ends. Its output goes to the agent
 `praxis wait <agent>` waits (as long as it takes) until that landing ends, then prints its output and ends with
 the same exit code `praxis land` would have. Run it again as often as you like: it reports the same result.
 When no landing is running, it reports how the agent's last landing ended.
+
+The check of a background landing runs in the same environment as the check of a landing in the foreground: the
+one your command had. Praxis puts nothing of its own install into it, so a `praxis` your check starts (for
+example `praxis run --heavy ...`) is the one your PATH or the launcher names at that moment, also after you have
+updated Praxis while the landing was running.
 
 ### Heavy jobs
 
@@ -643,9 +649,23 @@ Older Praxis commands are still running in this project (praxis land alice (pid 
 This newer Praxis will take over when they finish. Nothing was changed.
 ```
 
-Run it again when they have finished; the first command after that brings the database up to date. To take over
-at once, add `--upgrade-now` to any command (for example `praxis status --upgrade-now`): the older commands may
-then stop with an error, so use it only when you know they can be run again.
+Run it again when they have finished; the first command after that brings the database up to date.
+
+To take over at once, add `--upgrade-now` to any command (for example `praxis status --upgrade-now`). What it does
+depends on what the older Praxis is still running:
+
+- **Only heavy jobs:** it takes over. A heavy job that is running or waiting carries on and ends with its own exit
+  code.
+- **A landing (`praxis land`), or any other command:** it refuses, exits with code 1 and changes nothing. The check
+  of an older landing starts `praxis` commands with the older Praxis, the newer database would refuse them, the
+  check would fail, and every agent in that landing's batch would be told its work failed. The message names the
+  landings: wait for them, or stop them and land them again with the newer Praxis afterwards. If you want to take
+  over regardless, add `--even-with-older-landings` as well; the work of a landing that then fails is kept, and you
+  land it again.
+
+For as long as a command of the older Praxis is still running, `praxis status` names it at the top and says what
+it can still do, also after the newer Praxis has taken over. A command that was killed leaves its small file in
+`.git/praxis/procs/` behind; the next command that looks at the register removes it.
 
 A landing with a newer Praxis also never takes a landing of an older Praxis into its batch (see "Batched
 landings"): each `praxis land` writes into its place in the line which batch messages it understands, and one that
@@ -724,8 +744,13 @@ newer one for this project.
 **"Older Praxis commands are still running in this project"**
 You ran a newer Praxis while commands of an older one (the message lists them) are still at work in the project.
 The newer Praxis changed nothing and takes over when they finish: run your command again then. If a listed command
-is stuck or no longer wanted, stop it; if you must take over right now, add `--upgrade-now` to your command (the
-older commands may then stop with an error). See "Several versions of Praxis".
+is stuck or no longer wanted, stop it; if you must take over right now, add `--upgrade-now` to your command (it
+goes ahead when only heavy jobs of the older Praxis are left). See "Several versions of Praxis".
+
+**"Did not take this project over (--upgrade-now)"**
+A landing of an older Praxis is still running in the project (the message names it), and taking over under it
+would make its check fail. Nothing was changed. Wait for it (`praxis status` shows the landing line), or stop it
+and land that agent again with the newer Praxis afterwards. See "Several versions of Praxis".
 
 **"its changes clash with newer work"**
 Another agent landed a change to the same lines first; the message names whose landing when Praxis can tell.

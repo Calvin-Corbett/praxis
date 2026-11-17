@@ -51,7 +51,7 @@ else:
 
 
 PROCS = "procs"
-SWEEP_AFTER_SECONDS = 60  # an unlocked register file this old was left by a process that died
+SWEEP_AFTER_SECONDS = 60  # an unlocked register file this old was left by a process that died (see _left_behind)
 STARTING_SECONDS = 10  # a lock file this young, with no row yet, may belong to a command that is just starting
 SHOWN = 12  # the refusal names at most this many commands
 CROWDED = 200  # with more files than this in the register, a starting command first clears out the dead ones
@@ -124,9 +124,29 @@ def unregister(registration) -> None:
         pass
 
 
+def _left_behind(path: Path) -> bool:
+    """True when the unlocked register file at *path* belongs to no process any more, so it can be removed now.
+
+    A command that is just starting has made its file and not locked it yet, and its file must stay. On Windows a
+    file another process still has open cannot be removed, so trying is safe. Elsewhere the file's name gives the
+    process number: a process that is gone left it. Only when that cannot be told does the file's age decide."""
+    if os.name == "nt":
+        return True
+    try:
+        os.kill(int(path.name.split("-")[0]), 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, ValueError, OverflowError):
+        pass
+    try:
+        return time.time() - path.stat().st_mtime > SWEEP_AFTER_SECONDS
+    except OSError:
+        return False
+
+
 def running(state_dir: Path, skip: Path | None = None) -> list[dict]:
-    """What every live registered Praxis command wrote about itself, oldest first. Files left by dead processes are
-    removed on the way."""
+    """What every live registered Praxis command wrote about itself, oldest first. Files left by dead processes
+    (a killed one never removes its own) are removed whenever they are seen here."""
     found = []
     try:
         names = sorted(os.listdir(state_dir / PROCS))
@@ -140,11 +160,11 @@ def running(state_dir: Path, skip: Path | None = None) -> list[dict]:
             # Whoever wrote no (readable) stamp is counted as knowing no format at all: the careful reading.
             found.append(read_stamp(path) or {"command": "a Praxis command that did not say what it is"})
             continue
-        try:
-            if time.time() - path.stat().st_mtime > SWEEP_AFTER_SECONDS:
+        if _left_behind(path):
+            try:
                 path.unlink()
-        except OSError:
-            pass
+            except OSError:
+                pass
     return sorted(found, key=lambda facts: _number(facts.get("started")))
 
 
@@ -191,9 +211,20 @@ def _unstamped(state_dir: Path, db, table: str) -> tuple[list, int]:
     return older, starting
 
 
-def older_commands(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[str]:
-    """The live Praxis commands in this project whose Praxis knows a database format older than *fmt*, each as a few
-    words for a person ("what, and the process number when known"). Empty when a newer Praxis may take over.
+LAND, HEAVY, OTHER = "land", "heavy", "other"  # what an older command is, for the code that decides by it
+
+
+def _kind(command: str) -> str:
+    """Which command a registered command line is: its first word after `praxis` that is not an option."""
+    words = [word for word in str(command).split()[1:] if not word.startswith("--")]
+    if words[:1] == ["land"]:
+        return LAND
+    return HEAVY if words[:1] == ["run"] else OTHER
+
+
+def older(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[tuple[str, str]]:
+    """The live Praxis commands in this project whose Praxis knows a database format older than *fmt*, each as
+    (LAND, HEAVY or OTHER, a few words for a person: what, and the process number when known).
 
     *db* is the open database (any format). Commands that registered say their format themselves. A Praxis from before
     the register is found by what it does keep locked: its place in the landing line and its heavy jobs.
@@ -204,13 +235,13 @@ def older_commands(state_dir: Path, db, fmt: int, skip: Path | None = None) -> l
             words = _short(facts.get("command") or "a Praxis command")
             about = [f"pid {facts['pid']}"] if isinstance(facts.get("pid"), int) else []
             about += [f"Praxis {facts['version']}"] if isinstance(facts.get("version"), str) else []
-            found.append(words + (f" ({', '.join(about)})" if about else ""))
+            found.append((_kind(facts.get("command") or ""), words + (f" ({', '.join(about)})" if about else "")))
     tables = _tables(db)
     starting = 0
     if "queue" in tables:
         rows, n = _unstamped(state_dir, db, "queue")
         starting += n
-        found += [f"praxis land {row['agent']} (an older Praxis, pid not known)" for row in rows]
+        found += [(LAND, f"praxis land {row['agent']} (an older Praxis, pid not known)") for row in rows]
     if "heavy" in tables:
         rows, n = _unstamped(state_dir, db, "heavy")
         starting += n
@@ -218,10 +249,15 @@ def older_commands(state_dir: Path, db, fmt: int, skip: Path | None = None) -> l
             about = ["an older Praxis"]
             about += [f"by {row['agent']}"] if row["agent"] and row["agent"] != "(nobody)" else []
             about += [f"its job is pid {row['pid']}"] if row["pid"] else []
-            found.append(f"{_short('praxis run --heavy ' + row['command'])} ({', '.join(about)})")
+            found.append((HEAVY, f"{_short('praxis run --heavy ' + row['command'])} ({', '.join(about)})"))
     if starting:
-        found.append(f"{starting} landing or heavy job of an older Praxis that is just starting")
+        found.append((OTHER, f"{starting} landing or heavy job of an older Praxis that is just starting"))
     return found
+
+
+def older_commands(state_dir: Path, db, fmt: int, skip: Path | None = None) -> list[str]:
+    """older(), as the words alone. Empty when a newer Praxis may take over."""
+    return [words for _kind, words in older(state_dir, db, fmt, skip)]
 
 
 def listed(commands: list[str]) -> str:
@@ -234,5 +270,35 @@ def refusal(commands: list[str]) -> str:
     return (
         f"Older Praxis commands are still running in this project ({listed(commands)}). This newer Praxis will take "
         "over when they finish. Nothing was changed. (To take over now instead, run the same command with "
-        "--upgrade-now: the older commands may then stop with an error.)"
+        "--upgrade-now: it goes ahead when all that is left of the older Praxis are heavy jobs, and those finish "
+        "normally.)"
+    )
+
+
+def no_takeover(found: list[tuple[str, str]]) -> str | None:
+    """Why --upgrade-now must not take the project over under the older commands *found* (see older), or None when it
+    may: when all that is left of the older Praxis are heavy jobs, which run to their end whatever the database's
+    format.
+
+    A landing is different. Its check starts `praxis` commands with the older Praxis, the newer database refuses
+    them, the check fails, and every agent in that landing's batch is told its work failed."""
+    landings = [words for kind, words in found if kind == LAND]
+    others = [words for kind, words in found if kind == OTHER]
+    if not landings and not others:
+        return None
+    parts = []
+    if landings:
+        parts.append(
+            f"Landings of an older Praxis are still running in this project ({listed(landings)}), and taking over "
+            "under them makes their checks fail: wait for them, or stop them and land them again with this Praxis "
+            "afterwards."
+        )
+    if others:
+        parts.append(
+            f"Other commands of an older Praxis are still running in this project ({listed(others)}): wait for "
+            "them to end."
+        )
+    return (
+        "Did not take this project over (--upgrade-now). " + " ".join(parts) + " Nothing was changed. (Heavy jobs of "
+        "an older Praxis alone do not stop --upgrade-now. To take over regardless, add --even-with-older-landings.)"
     )
