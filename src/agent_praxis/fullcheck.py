@@ -4,12 +4,15 @@ praxis.toml's `full_check` is the command that proves the WHOLE project works (t
 `praxis fullcheck` runs it now, and `full_check_every = N` starts it in the background after every N landings that did
 not run that exact command themselves. It always runs on the main version in a scratch folder of its own
 (`<agent folders>/_fullcheck`, a git worktree on no branch), never in the main folder and never inside the landing
-line, so landings carry on while it runs. It takes a heavy job place like any other heavy job.
+line, so landings carry on while it runs.
 
-When it fails, Praxis looks for the landing that broke it. The landings since the last pass are searched the way
-`git bisect` searches commits: check the middle one, keep the half that holds the break, again, each step one more
-run in the scratch folder. The answer is recorded and `praxis status` shows it under NEEDS YOU: whose landing, the
-commit, the log, and the exact `git revert` command. Praxis never undoes a landing itself.
+One failed run is not proof (a busy PC fails it too), so a failure counts only when the same commit fails a second
+time (`full_check_confirm`, on by default). Then Praxis looks for the landing behind it: the landings since the last
+pass are searched the way `git bisect` searches commits, by the same rule (fullsearch.py). What the runs showed is
+recorded and `praxis status` says exactly that (fullwords.py): under NEEDS YOU the landing it starts to fail at, the
+commit, the logs and the exact `git revert` command, or that it failed and then passed and nobody is named. Praxis
+never undoes a landing itself. Every run of the command takes a heavy job place of its own and gives it back when
+it ends, so the other heavy jobs get their turn between two runs.
 
 Every run is a row in the project database (`fullchecks`, database format 5). A running full check keeps
 `.git/praxis/fullcheck/running.lock` locked. A run whose process died leaves its row without a result and the lock
@@ -19,15 +22,15 @@ free: the next landing sees that, marks the row interrupted and starts the full 
 from __future__ import annotations
 
 import dataclasses
-import json
 import os
 import sys
 import time
 from pathlib import Path
 
-from agent_praxis import checkcache, gitops, heavy, hooks
-from agent_praxis.agents import PARALLEL_CHECKOUT, Ctx, _tree
+from agent_praxis import fullsearch, gitops, heavy, hooks
+from agent_praxis.agents import PARALLEL_CHECKOUT, Ctx
 from agent_praxis.errors import PraxisError
+from agent_praxis.fullwords import OWN_CHECK, describe, short
 from agent_praxis.landing_queue import _try_lock, _unlock, held
 
 SCRATCH = "_fullcheck"  # an agent's name cannot start with "_", so no agent's folder ever has this name
@@ -35,17 +38,12 @@ WHO = {"name": "full-check", "task": "the full check of the main version"}  # wh
 HEAVY_NAME = "(full check)"
 ASKED = "you asked for it (praxis fullcheck)"
 POLL_SECONDS = 0.5
-NEEDS_THE_HUMAN = 3  # the command's exit code for "a tool or service I need is down": no verdict on the project
 JUDGED = ("passed", "failed")  # results that say something about the project (the others: the run did not finish)
 KEEP = 500  # the newest runs kept in the database
 
 
 def command(cfg) -> str:
     return cfg.full_check.strip()
-
-
-def short(commit: str | None) -> str:
-    return (commit or "")[:10]
 
 
 def scratch_folder(ctx: Ctx, name: str = SCRATCH) -> Path:
@@ -191,7 +189,7 @@ def _after_landing(ctx: Ctx, used: str, tip: str) -> None:
     if used == cmd:  # the files that landed passed the full check command: main is known good here
         covered = _newest_landing(store)
         with store.write() as db:
-            _new_run(db, tip, cmd, "a landing's own check", covered, "passed", "the landing's check was this command")
+            _new_run(db, tip, cmd, OWN_CHECK, covered, "passed", "the landing's check was this command")
         return
     if running(store):
         return
@@ -247,8 +245,9 @@ def command_line(ctx: Ctx, background: bool = False, child: bool = False, why: s
 
 
 def run(ctx: Ctx, why: str = ASKED, auto: bool = False) -> int:
-    """Run the full check on the main version now. 0 when it passed, 2 when it did not. With *auto* (the background
-    process): give way to a run already going, and run again while landings that are due keep arriving."""
+    """Run the full check on the main version now. 0 when it passed (also when it failed first and passed when it
+    was run again), 2 when it did not. With *auto* (the background process): give way to a run already going, and
+    run again while landings that are due keep arriving."""
     store, cmd = ctx.store, command(ctx.cfg)
     while True:
         handle = take_lock(_lock_path(store))
@@ -262,16 +261,15 @@ def run(ctx: Ctx, why: str = ASKED, auto: bool = False) -> int:
             return code
     try:
         _close_interrupted(store)
-        with heavy.place(ctx, HEAVY_NAME, cmd) as (_mine, token):
-            while True:
-                code, result = _once(ctx, cmd, why, token)
-                every = ctx.cfg.full_check_every
-                due = landings_since(store, cmd) if auto and every > 0 and result in JUDGED else 0
-                if due < max(every, 1):
-                    return code
-                why = f"{due} landing(s) arrived while the last one ran (full_check_every = {every})"
-                ctx.say("")
-                ctx.say(f"Running the full check again: {why}.")
+        while True:
+            code, result = _once(ctx, cmd, why)
+            every = ctx.cfg.full_check_every
+            due = landings_since(store, cmd) if auto and every > 0 and result in JUDGED else 0
+            if due < max(every, 1):
+                return code
+            why = f"{due} landing(s) arrived while the last one ran (full_check_every = {every})"
+            ctx.say("")
+            ctx.say(f"Running the full check again: {why}.")
     finally:
         _unlock(handle)
         handle.close()
@@ -297,7 +295,7 @@ def _follow(ctx: Ctx, cmd: str) -> int | None:
     return None
 
 
-def _once(ctx: Ctx, cmd: str, why: str, token: str | None) -> tuple[int, str]:
+def _once(ctx: Ctx, cmd: str, why: str) -> tuple[int, str]:
     """One full check of the main version as it is now: (exit code, the result recorded)."""
     store, main = ctx.store, ctx.cfg.main_branch
     covered = _newest_landing(store)  # read BEFORE the commit: a landing in between is then simply judged again
@@ -306,7 +304,7 @@ def _once(ctx: Ctx, cmd: str, why: str, token: str | None) -> tuple[int, str]:
         raise PraxisError(f"The main branch {main!r} does not exist, so there is nothing to check.")
     with store.write() as db:
         run_id = _new_run(db, tip, cmd, why, covered)
-    one = _Run(ctx, cmd, token, run_id, tip)
+    one = _Run(ctx, cmd, run_id, tip)
     try:
         return one.go()
     except KeyboardInterrupt:
@@ -377,222 +375,55 @@ def _put_files(folder: Path, commit: str) -> None:
 
 
 class _Run:
-    """One full check of one main version, and the search for the landing that broke it when it fails."""
+    """One full check of one main version: the runs of the command, each in a heavy job place of its own. Which
+    runs are made, and what they prove, is fullsearch's business."""
 
-    def __init__(self, ctx: Ctx, cmd: str, token: str | None, run_id: int, tip: str):
-        self.ctx, self.cmd, self.token, self.id, self.tip = ctx, cmd, token, run_id, tip
-        self.root = ctx.repo.root
+    def __init__(self, ctx: Ctx, cmd: str, run_id: int, tip: str):
+        self.ctx, self.cmd, self.id, self.tip = ctx, cmd, run_id, tip
         self.scratch: Path | None = None
-        self.bad: dict[str, str | None] = {}  # commit -> the log of the run that failed on it
-        self.steps: list[dict] = []  # what the search found out, kept in the row as it goes
-        self.runs = 0
 
     def check(self, commit: str) -> tuple[int, str, str]:
-        """Put the files of *commit* into the scratch folder and run the command there: (exit code, output, log)."""
+        """Wait for a heavy job place, put the files of *commit* into the scratch folder and run the command there:
+        (exit code, output, log). The place is given back when the command ends."""
         from agent_praxis import landing as L
 
-        _put_files(self.scratch, commit)
-        extra = {"PRAXIS_COMMIT": commit}
-        if self.token:
-            extra[heavy.TOKEN_ENV] = self.token  # a `praxis run --heavy` inside the command runs in this job's place
-        cfg = dataclasses.replace(self.ctx.cfg, env={**self.ctx.cfg.env, **extra})
-        self.runs += 1
-        code, output, log = L._run_check(dataclasses.replace(self.ctx, cfg=cfg), WHO, self.scratch, self.cmd)
+        with heavy.place(self.ctx, HEAVY_NAME, self.cmd) as (_mine, token):
+            if self.scratch is None:
+                self.scratch = _scratch(self.ctx, self.tip)
+            _put_files(self.scratch, commit)
+            extra = {"PRAXIS_COMMIT": commit}
+            if token:
+                extra[heavy.TOKEN_ENV] = token  # a `praxis run --heavy` inside the command runs in this job's place
+            cfg = dataclasses.replace(self.ctx.cfg, env={**self.ctx.cfg.env, **extra})
+            code, output, log = L._run_check(dataclasses.replace(self.ctx, cfg=cfg), WHO, self.scratch, self.cmd)
         with self.ctx.store.write() as db:
             db.execute("UPDATE fullchecks SET log = COALESCE(log, ?) WHERE id = ?", (log, self.id))
         return code, output, log
 
     def go(self) -> tuple[int, str]:
-        ctx, main, tip = self.ctx, self.ctx.cfg.main_branch, self.tip
-        self.scratch = _scratch(ctx, tip)
-        ctx.say(f"Running the full check on {main} (commit {short(tip)}): {self.cmd}")
-        ctx.say(f"It runs in a scratch folder of its own ({self.scratch}). Landings carry on meanwhile.")
-        code, _output, log = self.check(tip)
-        if code == 0:
-            self._remember_pass(tip)
-            _finish(ctx.store, self.id, "passed", log=log)
-            ctx.say(f"The full check passed on {main} (commit {short(tip)}). Its output: {log}")
-            return 0, "passed"
-        if code == NEEDS_THE_HUMAN:
-            note = (
-                f"it ended with exit code {NEEDS_THE_HUMAN}, which means a problem outside the project's files "
-                "(a tool or service it needs is down), so it says nothing about the landings"
-            )
-            _finish(ctx.store, self.id, "unknown", log=log, note=note)
-            self._report()
-            return 2, "unknown"
-        self.bad[tip] = log
-        ctx.say(f"The full check FAILED on {main} (commit {short(tip)}). Its output: {log}")
-        found = self._find_culprit()
-        _finish(ctx.store, self.id, "failed", log=log, steps=json.dumps(self.steps), **found)
-        self._report()
-        return 2, "failed"
-
-    def _report(self) -> None:
-        row = self.ctx.store.row("SELECT * FROM fullchecks WHERE id = ?", (self.id,))
-        for line in describe(self.ctx, row):
-            self.ctx.say(line)
-
-    def _remember_pass(self, commit: str) -> None:
-        tree = _tree(self.root, commit)
-        if tree:
-            checkcache.record(self.ctx.store, tree, self.cmd)  # the same files and command: a landing reuses it too
-
-    # finding the landing that broke it ---------------------------------------------------------------------------
-
-    def _points(self, good: str, after_landing_id: int) -> list[dict]:
-        """The main version after each landing since the last pass, oldest first, ending with the version that
-        failed. Each is a commit the search may check."""
-        points, seen = [], {good}
-        rows = self.ctx.store.rows(
-            "SELECT agent, task, commit_id FROM landings WHERE ok = 1 AND commit_id IS NOT NULL AND id > ? ORDER BY id",
-            (after_landing_id,),
-        )
-        for row in rows:
-            commit = row["commit_id"]
-            if commit in seen:
-                continue
-            seen.add(commit)
-            if gitops.is_ancestor(self.root, good, commit) and gitops.is_ancestor(self.root, commit, self.tip):
-                points.append({"agent": row["agent"], "task": row["task"], "commit": commit})
-        if not points or points[-1]["commit"] != self.tip:  # main holds commits no landing brought (see describe)
-            points.append({"agent": None, "task": None, "commit": self.tip})
-        return points
-
-    def _learn_earlier_failures(self, since_run: int) -> None:
-        """Runs since the last pass that already failed on a commit: no need to run those commits again."""
-        rows = self.ctx.store.rows(
-            "SELECT commit_id, result, log, steps FROM fullchecks WHERE command = ? AND id > ? AND id != ?",
-            (self.cmd, since_run, self.id),
-        )
-        for row in rows:
-            if row["result"] == "failed":
-                self.bad.setdefault(row["commit_id"], row["log"])
-            try:
-                steps = json.loads(row["steps"] or "[]")
-            except ValueError:
-                continue
-            for step in steps if isinstance(steps, list) else []:
-                if isinstance(step, dict) and step.get("ok") is False and step.get("commit"):
-                    self.bad.setdefault(step["commit"], step.get("log"))
-
-    def _find_culprit(self) -> dict:
-        """The columns of the failed row that say what broke it: the landing, or why Praxis cannot tell."""
         ctx, tip = self.ctx, self.tip
-        passed = newest(ctx.store, self.cmd, ("passed",))
-        if passed is None:
-            return {
-                "note": "The full check has not passed on this project before, so there is no good version to "
-                "compare with, and Praxis cannot tell which landing broke it."
-            }
-        good = passed["commit_id"]
-        if good == tip:
-            return {
-                "good_commit": good,
-                "note": "This same commit passed the full check before, so no landing broke it: the full check "
-                "itself gives different answers on the same files (or something outside the files changed).",
-            }
-        if not gitops.is_ancestor(self.root, good, tip):
-            return {
-                "good_commit": good,
-                "note": f"The commit that last passed ({short(good)}) is no longer part of "
-                f"{ctx.cfg.main_branch}, so Praxis cannot tell which landing broke it.",
-            }
-        points = self._points(good, passed["landing_id"])
-        self._learn_earlier_failures(passed["id"])
-        if len(points) > 1:
-            ctx.say(
-                f"Looking for the landing that broke it: {len(points)} landings since the last pass "
-                f"(commit {short(good)}). Praxis checks the middle one, then the half that holds the break."
-            )
-        low, high = -1, len(points) - 1  # points[low] passes (low -1: the last pass itself), points[high] fails
-        while high - low > 1:
-            middle = (low + high) // 2
-            verdict = self._verdict(points[middle])
-            if verdict is None:
-                return {
-                    "good_commit": good,
-                    "note": f"Praxis could not finish finding the landing that broke it: a run ended with exit "
-                    f"code {NEEDS_THE_HUMAN} (a tool or service the full check needs is down). It is one of the "
-                    f"{high - low} landing(s) after commit {short(points[low]['commit'] if low >= 0 else good)}.",
-                }
-            if verdict:
-                low = middle
-            else:
-                high = middle
-        culprit = points[high]
-        before = points[high - 1]["commit"] if high > 0 else good
-        return {
-            "good_commit": good,
-            "culprit_agent": culprit["agent"],
-            "culprit_task": culprit["task"],
-            "culprit_commit": culprit["commit"],
-            "culprit_log": self.bad.get(culprit["commit"]) or self.bad.get(tip),
-            "undo": _undo_command(ctx, _past_rebuilds(ctx, before, culprit["commit"]), culprit["commit"]),
-        }
-
-    def _verdict(self, point: dict) -> bool | None:
-        """True when the full check passes on this point, False when it fails, None when it could not tell."""
-        ctx, commit = self.ctx, point["commit"]
-        whose = f"{point['agent']}'s landing" if point["agent"] else "the newest version"
-        if commit in self.bad:
-            ctx.say(f"  After {whose} (commit {short(commit)}): it already failed there in an earlier run.")
-            return False
-        tree = _tree(self.root, commit)
-        if tree and checkcache.passed_at(ctx.store, tree, self.cmd) is not None:
-            ctx.say(f"  After {whose} (commit {short(commit)}): the same files already passed this command.")
-            self._step(commit, True, None)
-            return True
-        ctx.say(f"  Checking {ctx.cfg.main_branch} as it was after {whose} (commit {short(commit)}).")
-        code, _output, log = self.check(commit)
-        if code == NEEDS_THE_HUMAN:
-            return None
-        if code == 0:
-            self._remember_pass(commit)
+        ctx.say(f"Running the full check on {ctx.cfg.main_branch} (commit {short(tip)}): {self.cmd}")
+        ctx.say(f"It runs in a scratch folder of its own ({scratch_folder(ctx)}). Landings carry on meanwhile.")
+        search = fullsearch.Search(self, lambda: newest(ctx.store, self.cmd, ("passed",)))
+        verdict = search.judge({"agent": None, "task": None, "commit": tip}, run_it=True)
+        found: dict = {}
+        if verdict is False:
+            answer = search.find()
+            verdict, found = (True, {}) if answer is None else (False, answer)  # None: the failure did not come back
+        last_log = search.seen[tip]["log"]
+        if verdict is None:
+            result = "unknown"
+            _finish(ctx.store, self.id, result, log=last_log, note=search.unknown_note(), steps=search.steps())
+        elif verdict:
+            result = "passed"
+            _finish(ctx.store, self.id, result, log=last_log, steps=search.steps())
         else:
-            self.bad[commit] = log
-        ctx.say(f"    It {'passed' if code == 0 else 'FAILED'} there. Its output: {log}")
-        self._step(commit, code == 0, log)
-        return code == 0
-
-    def _step(self, commit: str, ok: bool, log: str | None) -> None:
-        self.steps.append({"commit": commit, "ok": ok, "log": log})
-        with self.ctx.store.write() as db:  # as it goes: a run that is interrupted keeps what it found out
-            db.execute("UPDATE fullchecks SET steps = ? WHERE id = ?", (json.dumps(self.steps), self.id))
-
-
-def _past_rebuilds(ctx: Ctx, before: str, commit: str) -> str:
-    """Praxis's own "Rebuild <generated file>" commits right after the landing before this one belong to that
-    landing's turn, not to this landing: the commit this landing really started from."""
-    from agent_praxis import generated
-
-    if not ctx.cfg.generated:
-        return before
-    log = gitops.git(["log", "--reverse", "--format=%H %s", f"{before}..{commit}"], ctx.repo.root, check=False)
-    for line in log.stdout.splitlines():
-        sha, _, subject = line.partition(" ")
-        files = gitops.changed_between(ctx.repo.root, before, sha)
-        if sha == commit or not subject.startswith("Rebuild "):
-            break
-        if not all(generated.entry_for(ctx.cfg, path) for path in files):
-            break
-        before = sha
-    return before
-
-
-def _undo_command(ctx: Ctx, before: str, commit: str) -> str:
-    """The exact git command that undoes what main gained from *before* to *commit* (one landing), or "" when no
-    single revert does it."""
-    root = ctx.repo.root
-    merges = gitops.git(["rev-list", "--merges", "-n1", f"{before}..{commit}"], root, check=False).stdout.strip()
-    if not merges:
-        if gitops.commits_not_in(root, [commit], [before]) == 1:
-            return f"git revert --no-edit {commit}"
-        return f"git revert --no-edit {before}..{commit}"
-    parents = gitops.git(["rev-parse", f"{commit}^@"], root, check=False).stdout.split()
-    if len(parents) == 2 and parents[1] == before:  # land_method = "merge": the landing is one merge on top of main
-        return f"git revert --no-edit -m 2 {commit}"
-    return ""
+            result = "failed"  # its log stays the first run's, the one that failed
+            _finish(ctx.store, self.id, result, steps=search.steps(), **found)
+        row = ctx.store.row("SELECT * FROM fullchecks WHERE id = ?", (self.id,))
+        for line in describe(ctx, row):
+            ctx.say(line)
+        return (0 if result == "passed" else 2), result
 
 
 # --- saying it -------------------------------------------------------------------------------------------------------
@@ -605,45 +436,3 @@ def failing(ctx: Ctx):
         return None
     last = newest(ctx.store, cmd, (*JUDGED, "unknown"))
     return last if last is not None and last["result"] != "passed" else None
-
-
-def describe(ctx: Ctx, row, found: str = "") -> list[str]:
-    """A finished run in plain words, one line per item: for the command's own output and for `praxis status`."""
-    main, commit = ctx.cfg.main_branch, short(row["commit_id"])
-    found = f", found {found}" if found else ""
-    if row["result"] == "passed":
-        return [f"The full check passed on {main} (commit {commit}). Its output: {row['log']}"]
-    if row["result"] == "unknown":
-        return [
-            f"The full check could not judge {main} (commit {commit}{found}): {row['note']}.",
-            f"Its output: {row['log']}" if row["log"] else "It wrote no output.",
-            "Fix what it reports, then run it again with: praxis fullcheck",
-        ]
-    lines = [f"The full check is FAILING on {main} (commit {commit}{found}). Its output: {row['log']}"]
-    culprit = row["culprit_commit"]
-    if not culprit:
-        lines.append(row["note"] or "Praxis could not tell which landing broke it.")
-        lines.append("After a fix lands, check again with: praxis fullcheck")
-        return lines
-    if row["culprit_agent"]:
-        lines.append(f'{row["culprit_agent"]}\'s landing "{row["culprit_task"]}" broke it (commit {culprit}).')
-    else:
-        lines.append(
-            f"It first fails at commit {culprit}, which no recorded landing brought in (a commit made outside "
-            "Praxis, or Praxis's own rebuild of a generated file)."
-        )
-    lines.append(
-        f"The version right before it passes the full check. Output of the run that fails there: {row['note']}"
-    )
-    if row["undo"]:
-        lines.append(
-            f"Praxis never undoes a landing by itself. To undo this one, run in the main folder ({ctx.repo.root}):"
-        )
-        lines.append(f"  {row['undo']}")
-        lines.append("Or have an agent land a fix. Then check again with: praxis fullcheck")
-    else:
-        lines.append(
-            "Praxis never undoes a landing by itself, and no single `git revert` undoes this one (it holds merge "
-            "commits). Have an agent land a fix, then check again with: praxis fullcheck"
-        )
-    return lines

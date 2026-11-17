@@ -337,28 +337,69 @@ It never runs in your main folder and never holds up the landing line. Praxis ke
 to the agent folders (`<project>-praxis/_fullcheck`), puts the files of the main version there and runs the command
 in it, while agents keep landing. The folder holds only what is committed; the `share` folders are linked into it and
 `setup` runs in it once, as for a new agent folder, and it is kept between runs so your tools' caches are kept too.
-The full check takes a heavy job place like any `praxis run --heavy` job (so it waits its turn when `heavy_jobs` of
-them are already running), opens no window, and writes to `.git/praxis/logs/full-check-*.log`. The command gets
-`PRAXIS_COMMIT`, the commit it is testing. `praxis fullcheck --background` starts it and returns at once;
-`praxis status` shows how it goes.
+Every run of the command takes a heavy job place like any `praxis run --heavy` job (so it waits its turn when
+`heavy_jobs` of them are already running) and gives the place back when it ends, so when the full check has to run
+more than once, the other heavy jobs get their turn in between. It opens no window and writes to
+`.git/praxis/logs/full-check-*.log`. The command gets `PRAXIS_COMMIT`, the commit it is testing.
+`praxis fullcheck --background` starts it and returns at once; `praxis status` shows how it goes.
 
-**When it fails, Praxis finds the landing that broke it.** It takes the landings since the last pass and searches
-them the way `git bisect` searches commits: test the main version as it was after the middle landing, keep the half
-that holds the break, and again, each step one more run in the scratch folder (a batch is searched agent by agent).
-`praxis status` then shows under NEEDS YOU whose landing broke it, the commit, the log of the run that fails
-there, and the exact `git revert` command that undoes that landing. **Praxis never undoes a landing by itself.**
-You run that command in the main folder, or have an agent land a fix; then `praxis fullcheck` checks again, and the
-notice goes away when it passes.
+**One failed run is not proof.** A whole test suite also fails on a PC that is too busy for its time limits, and
+when one test sometimes fails by itself. Praxis knows a run's exit code and where its output is, nothing more (it
+never reads test output), so the only way it can tell is to run again. The rule:
+
+- A pass counts on one run. A failure counts only when the same commit has failed twice.
+- When the newest main version fails, the command runs a second time on the same commit. If it passes then, Praxis
+  records "failed once, then passed", names nobody and prints no undo command. `praxis fullcheck` ends with exit
+  code 0, and `praxis status` says what happened under FULL CHECK, with the output of the run that failed and of the
+  run that passed. That is information, not an alarm. It becomes a notice under NEEDS YOU only when it keeps
+  happening: when the same files gave two answers in 2 of the last 3 runs of the full check.
+- When it fails both times, Praxis looks for the landing behind it. It takes the landings since the last pass and
+  searches them the way `git bisect` searches commits: test the main version as it was after the middle landing,
+  keep the half that holds the break, and again (a batch is searched agent by agent). The same rule holds at every
+  step: a version that fails is run again at once, and one that then passes is taken for good.
+- A landing is named only when the full check failed twice on the main version right after it, passed on the
+  version right before it, and nothing in this search passed after that last failure. If something did (the
+  failures may all be older than the passes: the PC was busy, and then it was not), the version about to be named
+  runs once more. If it fails again, it is named. If it passes now, it is good after all and the search goes on
+  above it; and when in the end the newest version itself passes, the failure did not come back: nobody is named,
+  and status says that Praxis could not make it come back.
+
+`praxis status` then shows under NEEDS YOU what the runs showed and no more: how many times the newest version
+failed, the landing it starts to fail at, the commit, how many times it failed there and the output of each of those
+runs, where the pass of the version before it comes from (this same search, a remembered pass of the same files, or
+the full check's last pass, which is not run again), and the exact `git revert` command that undoes that landing.
+If a version failed and then passed during the search, it says that too, because then the check is not steady and
+you should read the outputs before you undo anything. **Praxis never undoes a landing by itself.** You run that
+command in the main folder, or have an agent land a fix; then `praxis fullcheck` checks again, and the notice goes
+away when it passes.
+
+**What a failure costs in runs.** A pass costs one run, as before. A failure that passes when run again costs two.
+A real break costs two runs on the newest version, then the search: one run for every version that passes, two for
+every version that fails, and sometimes one more of the version about to be named. That is about twice what it was
+(before: one run, then one for each step of the search). With 5 landings since the last pass it is 5 or 6 runs
+where it was 3 or 4 (with a full check of 20 minutes, about two hours of background runs, each waiting its turn in
+the heavy job line); with one landing it is 2 where it was 1. A check that is not steady costs more, because every
+failure that then passes was one extra run. `full_check_confirm = false` in
+`praxis.toml` turns all of this off: every failed run counts at once and nothing runs a second time, which is
+cheaper and will sometimes name a landing that broke nothing.
 
 Good to know:
 
 - Until the full check has passed once, there is no good version to compare with, so a failure is reported
-  without a culprit. Run `praxis fullcheck` once when you set it up.
+  without a landing. Run `praxis fullcheck` once when you set it up.
 - If the full check's process is cut short (a closed terminal, a crash, a restart), nothing is left half-done: the
-  next landing notices and starts it again, and what its search had already found out is not run again.
+  next landing notices and starts it again, and what its search had already found out is not run again. Failed runs
+  recorded since the last pass count: a commit that failed once in an earlier full check needs one more failed run,
+  not two.
 - Exit code 3 from the command means "a tool or service I need is down", as for the normal check: Praxis reports
-  that it could not judge the main version and blames no landing.
-- A full check that sometimes fails by itself will sometimes blame a landing wrongly. Keep it deterministic.
+  that it could not judge the main version and blames no landing, also when that happens on a second run.
+- What two failed runs cannot rule out: something outside the project's files that stays broken (a full disk, a
+  port in use, a PC that stays busy for hours). Then every version fails twice, and the search ends at the oldest
+  landing since the last pass. Status says which pass the version before it rests on, and when that is "the full
+  check's last pass", that version was not run again: check out that commit and run the command yourself before
+  you undo anything.
+- A break that only shows sometimes (it fails, then passes on the same files) is taken for a one-off each time.
+  The notice under NEEDS YOU for a check that keeps giving two answers is how you see it.
 
 ### Early checks for the line
 
@@ -627,6 +668,11 @@ after how many landings Praxis runs it on the main version by itself (see "The f
 when you run `praxis fullcheck`. `full_check_every` above 0 with an empty `full_check` is refused, so you never
 believe in a safety net that is not there.
 
+**`full_check_confirm`** (default `true`): one failed run of the full check is not taken as proof. A failure counts
+only when the same commit fails a second time, and a landing is named only when the full check failed twice on its
+version and passed on the version before it (see "The full check" above, which also says what a failure then costs
+in runs). `false`: every failed run counts at once and nothing runs a second time, as it was before this setting.
+
 **`speculate`** (default `false`): start the next waiting agent's check early, while the check of the agent at the
 front of the landing line runs (see "Early checks for the line" above). One at a time, and only when a heavy job
 place is free.
@@ -867,9 +913,16 @@ file to the released commit (the top of the file says how).
   the same way without getting better. Praxis shows why. Look at the agent's work, decide what it should do,
   tell it, then run `praxis resume <name>`. An agent that is making progress (fewer problems each time) is
   never paused, however many tries it takes.
-- **The full check is failing.** The test of the whole project (`full_check`) failed on the main version. Praxis
-  shows whose landing broke it, the commit, the log, and the exact `git revert` command that undoes it. Praxis does
-  not undo it for you: run the command in the main folder, or have an agent land a fix, then run `praxis fullcheck`.
+- **The full check is failing.** The test of the whole project (`full_check`) failed twice on the main version.
+  Praxis shows the landing it starts to fail at, the commit, how many times it failed there and the output of each
+  of those runs, where the pass of the version before it comes from, and the exact `git revert` command that undoes
+  that landing. Praxis does not undo it for you: run the command in the main folder, or have an agent land a fix,
+  then run `praxis fullcheck`. A full check that failed once and passed when it was run again is not here: it is told
+  under FULL CHECK, and nobody is named.
+- **The full check does not give one answer on the same files.** In 2 of its last 3 runs it failed and then passed
+  on the same commit. No landing is named and nothing needs undoing, but find out why: a test that sometimes fails
+  by itself, or a PC too busy for the check's time limits. Praxis shows the output of the runs that failed. The
+  notice goes away after two runs in a row that give one answer each.
 - **A check passed from memory but fails when run.** The audit ran a named check again that a landing had skipped
   because of a remembered pass, and it failed: its `inputs` list is probably missing files the check reads. Praxis
   shows the check, the landing that used the pass and the log, has dropped that check's remembered passes, and runs

@@ -294,20 +294,23 @@ def _audit_needs_you(ctx, now: float) -> list[str]:
 
 
 def _full_check_needs_you(ctx, now: float) -> list[str]:
-    """The full check's last word on the main version, when it is not "passed": what broke it and how to undo it."""
-    from agent_praxis import fullcheck
+    """The full check's last word on the main version, when it is not "passed": what its runs showed, the landing
+    it starts to fail at and how to undo it. And a notice when it keeps failing and then passing on the same files."""
+    from agent_praxis import fullcheck, fullwords
 
-    if not ctx.store.has("fullchecks"):  # the database was left at an older Praxis's format (store.py)
+    cmd = fullcheck.command(ctx.cfg)
+    if not cmd or not ctx.store.has("fullchecks"):  # the database was left at an older Praxis's format (store.py)
         return []
-    row = fullcheck.failing(ctx)
-    if row is None:
-        return []
-    lines = fullcheck.describe(ctx, row, found=ago(row["ended"] or row["started"], now))
-    return [f"  - {lines[0]}", *(f"      {line}" for line in lines[1:])]
+    row, out = fullcheck.failing(ctx), []
+    failing = fullcheck.describe(ctx, row, found=ago(row["ended"] or row["started"], now)) if row is not None else []
+    for lines in (failing, fullwords.keeps_giving_two_answers(ctx, cmd)):
+        if lines:
+            out += [f"  - {lines[0]}", *(f"      {line}" for line in lines[1:])]
+    return out
 
 
 def _full_check_lines(ctx, now: float) -> list[str]:
-    from agent_praxis import fullcheck
+    from agent_praxis import fullcheck, fullwords
 
     cmd = fullcheck.command(ctx.cfg)
     if not cmd or not ctx.store.has("fullchecks"):
@@ -329,6 +332,7 @@ def _full_check_lines(ctx, now: float) -> list[str]:
     elif judged["result"] == "passed":
         out.append(f"  - last passed {ago(judged['ended'] or judged['started'], now)} on commit "
                    f"{fullcheck.short(judged['commit_id'])} ({judged['why']}); {since} landing(s) since")
+        out += [f"      {line}" for line in fullwords.two_answer_lines(judged, passed_log=True)]
     else:
         out.append(f"  - FAILING since {ago(judged['ended'] or judged['started'], now)} on commit "
                    f"{fullcheck.short(judged['commit_id'])} (see NEEDS YOU above); {since} landing(s) since")

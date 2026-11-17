@@ -1,4 +1,6 @@
-"""The full check: `praxis fullcheck`, the run after every N landings, and finding the landing that broke it."""
+"""The full check: `praxis fullcheck`, the run after every N landings, and finding the landing it starts to fail at.
+
+How a failure is confirmed before anyone is named has its own file: test_fullconfirm.py."""
 
 from __future__ import annotations
 
@@ -12,32 +14,55 @@ from pathlib import Path
 import pytest
 from conftest import check_command, edit, folder, git, praxis, praxis_process
 
-from agent_praxis import fullcheck, heavy
+from agent_praxis import fullcheck, fullwords, heavy
 from agent_praxis import store as store_module
 from agent_praxis.config import Config, parse_toml, render
 from agent_praxis.landing_queue import Ticket
 from agent_praxis.store import Store
 
-# A short fake full check. It notes where it ran and on which commit, optionally waits for a gate file, and fails when
-# a script says SLOW_BREAK: a break the quick check (which only looks for the word BROKEN) does not see.
+# A short fake full check. It notes where it ran, on which commit and in which heavy job place, optionally waits for
+# a gate file, and fails when a script says SLOW_BREAK: a break the quick check (which only looks for the word
+# BROKEN) does not see. A plan file (see `plan`) can make single runs fail whatever the files say, the way a busy PC
+# does: every run takes the first word off it, and "fail" fails that run, "down" ends it with exit code 3.
 FULL_CHECK = """\
 import os, pathlib, sys, time
 log, gate = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else None)
 with open(log, "a") as f:
     f.write(os.getcwd() + "|" + os.environ.get("PRAXIS_COMMIT", "") + "\\n")
+with open(log + ".places", "a") as f:
+    f.write(os.environ.get("PRAXIS_HEAVY_TOKEN", "") + "\\n")
 if gate:
     for _ in range(1200):
         if os.path.exists(gate):
             break
         time.sleep(0.05)
-if os.path.exists(log + ".down"):
+plan, word = pathlib.Path(log + ".plan"), ""
+if plan.exists():
+    words = plan.read_text().split()
+    word = words[0] if words else ""
+    plan.write_text(" ".join(words[1:]))
+if os.path.exists(log + ".down") or word == "down":
     print("the test database is down")
     sys.exit(3)
+if word == "fail":
+    print("ERROR: timed out waiting for a busy PC")
+    sys.exit(1)
 bad = sorted(str(p) for p in pathlib.Path("scripts").glob("*.gd") if "SLOW_BREAK" in p.read_text())
 for name in bad:
     print("ERROR: the whole suite fails on", name)
 sys.exit(1 if bad else 0)
 """
+
+
+def plan(log: Path, *words: str) -> None:
+    """What the next runs of the fake full check do, one word per run: "fail" (this run fails whatever the files
+    say), "down" (exit code 3) or "ok" (the files decide, as they do once the words are used up)."""
+    Path(str(log) + ".plan").write_text(" ".join(words))
+
+
+def places(log: Path) -> list[str]:
+    """The heavy job place (its token) each run of the fake full check ran in."""
+    return Path(str(log) + ".places").read_text().splitlines()
 
 
 def set_lines(project: Path, **values: str) -> None:
@@ -190,38 +215,47 @@ def test_it_runs_on_main_in_a_scratch_folder_and_never_in_the_main_folder(projec
     assert "Nothing needs you right now." in status
 
 
-def test_a_failure_names_the_landing_that_broke_it_and_how_to_undo_it(project, tmp_path):
+def test_a_failure_names_the_landing_it_starts_to_fail_at_and_how_to_undo_it(project, tmp_path):
     log = use_full_check(project, tmp_path)
     assert praxis("fullcheck")[0] == 0  # the last pass the search starts from
     land(project, "ann")
     land(project, "bob", "extends Node\n# SLOW_BREAK\n")  # the quick check does not see this
     land(project, "cat")
     land(project, "dan")
-    tip, culprit = git(project, "rev-parse", "main"), landed_commit(project, "bob")
+    tip = git(project, "rev-parse", "main")
+    culprit, before = landed_commit(project, "bob"), landed_commit(project, "ann")
     code, out = praxis("fullcheck")
     assert code == 2, out
+    assert "The full check is FAILING on main" in out and "): it failed there twice. Its outputs: " in out, out
     assert (
-        "The full check is FAILING on main" in out
-        and f'bob\'s landing "work of bob" broke it (commit {culprit})' in out
+        f'It starts to fail at bob\'s landing "work of bob" (commit {culprit}): the full check failed 3 times on main '
+        "as it was right after it, and passed on the version right before it." in out
     )
+    assert "That pass is from this same search: " in out, out
     assert f"  git revert --no-edit {culprit}" in out and "never undoes a landing by itself" in out
-    # git bisect over four landings: the newest fails, then bob's (fails), then ann's (passes) = 3 runs
-    assert [c for _w, c in ran(log)][1:] == [tip, culprit, landed_commit(project, "ann")]
+    # No failure counts on one run: the newest version twice, then git bisect over four landings by the same rule
+    # (bob's fails twice, ann's passes), and because ann's passed after bob's last failed, bob's once more.
+    assert [c for _w, c in ran(log)][1:] == [tip, tip, culprit, culprit, before, culprit]
     assert git(project, "rev-parse", "main") == tip, "nothing was undone"
     failed = rows(project)[-1]
     assert failed["result"] == "failed" and failed["culprit_agent"] == "bob" and failed["culprit_commit"] == culprit
     assert "ERROR: the whole suite fails on" in Path(failed["note"]).read_text()
+    seen = fullwords.facts(failed)
+    assert len(seen[tip]["failed"]) == 2 and len(seen[culprit]["failed"]) == 3 and seen[before]["ok"] is True
+    for name in [*seen[tip]["failed"], *seen[culprit]["failed"]]:
+        assert "ERROR: the whole suite fails on" in Path(name).read_text()
 
     status = praxis("status")[1]
     needs = status.split("WORKING NOW")[0]
-    assert "NEEDS YOU" in needs and 'bob\'s landing "work of bob" broke it' in needs
-    assert failed["note"] in needs and f"git revert --no-edit {culprit}" in needs
+    assert "NEEDS YOU" in needs and f'It starts to fail at bob\'s landing "work of bob" (commit {culprit})' in needs
+    assert all(name in needs for name in seen[culprit]["failed"]) and f"git revert --no-edit {culprit}" in needs
     assert "FAILING since just now" in status
 
     # still failing: one more run of the newest version, and what the search found out is not run again
     code, out = praxis("fullcheck")
-    assert code == 2 and "bob's landing" in out and "already failed there" in out, out
-    assert len(ran(log)) == 5
+    assert code == 2 and "bob's landing" in out and "already failed there 3 times in earlier runs" in out, out
+    assert "It failed on this commit in an earlier full check too" in out and "That pass is a remembered one" in out
+    assert len(ran(log)) == 8
 
     # the printed command is exact: run it as given, in the main folder, and the full check passes again
     undo = next(line.strip() for line in out.splitlines() if line.strip().startswith("git revert"))
@@ -344,7 +378,7 @@ def test_a_batch_that_breaks_the_full_check_is_searched_agent_by_agent(project, 
     failed = wait_finished(project, 2)[-1]
     assert failed["result"] == "failed" and failed["culprit_agent"] == "bob"
     assert failed["culprit_commit"] == landed_commit(project, "bob") != landed_commit(project, "ann")
-    assert 'bob\'s landing "work of bob" broke it' in praxis("status")[1].split("WORKING NOW")[0]
+    assert 'It starts to fail at bob\'s landing "work of bob"' in praxis("status")[1].split("WORKING NOW")[0]
 
 
 def test_an_interrupted_full_check_is_noticed_and_restarted_by_the_next_landing(project, tmp_path):

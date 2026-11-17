@@ -180,6 +180,24 @@
   naming both, and print the two `git config` lines that set the project's identity.
 
 ### Fixed
+- **A failed full check is confirmed before anyone is named.** Until now one failed run was taken as proof. On a PC
+  too busy for a test suite's time limits the full check failed on the newest version, the search then failed on an
+  older version for the same reason, passed on the one before it once the PC was quiet, and `praxis status` named
+  the landing in between as the one that broke it, with a `git revert` command. Nothing was broken. Now a pass
+  counts on one run and a failure only when the same commit fails a second time. If the second run passes, Praxis
+  records that it failed once and then passed, names nobody and prints no undo command: `praxis fullcheck` ends with
+  exit code 0 and `praxis status` says it under FULL CHECK with both outputs (a notice under NEEDS YOU comes only
+  when the same files gave two answers in 2 of the last 3 runs). The search goes by the same rule, and a landing is
+  named only when the full check failed twice on the version right after it, passed on the version right before
+  it, and nothing in the search passed after that last failure; if something did, that version runs once more, and
+  when the failure does not come back nobody is named and status says so. Status now says what the runs showed and
+  no more: "It starts to fail at <agent>'s landing" with how many times it failed there, every failed run's output,
+  and which pass the version before it rests on, where it used to say "<agent>'s landing broke it". A failure costs
+  about twice the runs it did (the README, "The full check", has the numbers), and every run now takes a heavy job
+  place of its own and gives it back when it ends, so other heavy jobs get their turn between two runs where the
+  whole search used to hold one place. `full_check_confirm = false` in `praxis.toml` turns the confirming off: every
+  failed run counts at once, as before. No change to the database: what each run showed is kept in the `steps`
+  column the full check's rows already had, and rows written by an older Praxis read as one failed run each.
 - **A landing that was stopped no longer drops work you save afterwards.** Before this, work could be dropped. When
   the `praxis land` of the agent at the front of a batch was killed during the check (an AI tool's time limit does
   that), its folder was left on no branch, holding the batch's files. If the agent then saved another commit there,

@@ -59,6 +59,7 @@ class Config:
     checks: list[dict] = field(default_factory=list)
     full_check: str = ""  # the command that proves the WHOLE project works: the safety net behind `checks`
     full_check_every: int = 0  # run it after this many landings that did not run it themselves; 0: only on demand
+    full_check_confirm: bool = True  # a failed full check counts only when the same commit fails a second time
     speculate: bool = False  # start the next waiting agent's check early, while the head's check runs
     audit_every: int = 20  # about one in this many passes used from memory is run again anyway; 0: never
     checks_together: bool = True  # several named checks of one landing run at once when heavy job places are free
@@ -200,10 +201,16 @@ batch_max = {cfg.batch_max}
 # net that makes quick `checks` safe to rely on. `praxis fullcheck` runs it now, on the main version, in a scratch
 # folder of its own, never in the main folder and never holding up landings. With full_check_every = N, Praxis
 # also starts it in the background after every N landings that did not run this exact command themselves (0: only
-# when you ask). If it fails, Praxis finds which landing broke it and `praxis status` says so under NEEDS YOU,
-# with the exact `git revert` command. Praxis never undoes a landing by itself.
+# when you ask). If it fails, Praxis finds the landing it starts to fail at and `praxis status` says so under
+# NEEDS YOU, with the exact `git revert` command. Praxis never undoes a landing by itself.
 full_check = {_q(cfg.full_check)}
 full_check_every = {cfg.full_check_every}
+
+# One failed run of the full check is not taken as proof: a busy PC fails it too, and so does a test that sometimes
+# fails by itself. With true, a failure counts only when the same commit fails a second time, and a landing is
+# named only when the full check failed twice on its version and passed on the version before it. A failure then
+# costs more runs (the README says how many). false: every failed run counts at once and nothing runs twice.
+full_check_confirm = {"true" if cfg.full_check_confirm else "false"}
 
 # Early checks. With true, while the agent at the front of the landing line runs its check, Praxis starts the
 # check of the next waiting agent early, beside it, on "main + the front agent's work + its own work" in a scratch
@@ -613,6 +620,7 @@ _KINDS = {"main_branch": str, "check": str, "check_may_change": list, "assets": 
           "env": dict, "exclusive_code": bool, "heavy_jobs": "jobs", "heavy_max": int, "batch_max": int,
           "heavy_min": int, "heavy_waiting_per_agent": int,
           "generated": "tables", "checks": "tables", "full_check": str, "full_check_every": int,
+          "full_check_confirm": bool,
           "speculate": bool, "audit_every": int, "checks_together": bool, "check_folder": str}
 _KIND_WORDS = {str: 'text in quotes, like "main"', list: 'a list in square brackets, like ["*.png", "*.wav"]',
                int: "a whole number, like 3", float: "a number, like 24",
