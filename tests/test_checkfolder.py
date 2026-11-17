@@ -8,6 +8,7 @@ landing started; what is saved or edited in the agent's folder after that stays 
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import types
@@ -15,7 +16,8 @@ from pathlib import Path
 
 from conftest import edit, folder, git, praxis, praxis_process
 from test_batch import finish, land_behind_a_ghost, main_subjects, new_agent, runs, wait_for
-from test_inputs import set_line
+from test_inputs import named_check, set_line, use_checks
+from test_inputs import runs as named_runs
 from test_stopped_landing import NUMBERED_CHECK, commit, landings
 
 from agent_praxis import checkfolder, config, fullcheck
@@ -137,6 +139,69 @@ def test_a_pass_remembered_from_before_is_found_and_the_folder_is_not_even_made(
     assert code == 0, out
     assert "same tree already passed" in out and runs(log) == 1, out
     assert own_folders(project) == ["_check-1"], "nothing had to run, so the line's folder was not made"
+
+
+# A check that writes down what it was told and where it ran, then passes.
+TOLD = """\
+import json, os, subprocess, sys
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True).stdout.split()
+seen = {key: os.environ.get(key) for key in ("PRAXIS_AGENT", "PRAXIS_TASK", "PRAXIS_CHECK", "PRAXIS_BASE")}
+with open(os.environ["PRAXIS_CHANGED_FILES"], encoding="utf-8") as listed:
+    seen["files"] = listed.read().split()
+seen["diff"] = git("diff", "--name-only", seen["PRAXIS_BASE"], "HEAD")
+seen["folder"], seen["branch"], seen["head"] = os.path.basename(os.getcwd()), git("branch", "--show-current"), git("rev-parse", "HEAD")
+with open(sys.argv[1], "a", encoding="utf-8") as out:
+    out.write(json.dumps(seen) + "\\n")
+"""
+
+
+def test_the_check_is_told_the_same_in_the_lines_folder_as_in_the_agents(project, tmp_path):
+    """What the two ways agree on, and the two things they cannot: the folder's name and its branch."""
+    log = line_check(project, tmp_path, where="agent", script=TOLD)
+    before = git(project, "rev-parse", "main")
+    new_agent(project, "alice")
+    code, out = praxis("land", "alice")
+    assert code == 0, out
+    between = git(project, "rev-parse", "main")
+    set_line(project, 'check_folder = "line"')
+    new_agent(project, "bob")
+    code, out = praxis("land", "bob")
+    assert code == 0, out
+    in_agents, in_lines = (json.loads(line) for line in log.read_text(encoding="utf-8").splitlines())
+    for seen, name, base, landed in ((in_agents, "alice", before, between),
+                                     (in_lines, "bob", between, git(project, "rev-parse", "main"))):
+        assert seen["PRAXIS_AGENT"] == name and seen["PRAXIS_TASK"] == f"work of {name}", seen
+        assert seen["PRAXIS_CHECK"] == "1" and seen["PRAXIS_BASE"] == base, seen
+        assert seen["files"] == [f"scripts/{name}.gd"] and seen["diff"] == seen["files"], seen
+        assert seen["head"] == [landed], "the folder held exactly the commit that then landed"
+    assert (in_agents["folder"], in_agents["branch"]) == ("alice", ["praxis/alice"])
+    assert (in_lines["folder"], in_lines["branch"]) == ("_line", []), "another folder, on no branch"
+
+
+def test_a_named_checks_pass_earned_in_one_folder_counts_in_the_other(project, tmp_path):
+    """A pass is remembered by the files the check reads and its command, never by where it ran."""
+    use_checks(project, named_check(tmp_path, "core", ["scripts/player.gd"], paths=["scripts/**"]))
+    set_line(project, 'check_folder = "line"')
+    new_agent(project, "alice")
+    code, out = praxis("land", "alice")
+    assert code == 0 and "Running check core: " in out, out
+    set_line(project, 'check_folder = "agent"')
+    new_agent(project, "bob")
+    code, out = praxis("land", "bob")
+    assert code == 0 and "Skipping check core: it passed at " in out, out
+    assert named_runs(tmp_path) == ["core"], "earned in the line's folder, used in the agent's"
+    code, out = praxis("start", "carol", "work of carol", "scripts/player.gd")
+    assert code == 0, out
+    edit(folder(project, "carol") / "scripts" / "player.gd", "extends Node\nvar speed = 11\n")
+    code, out = praxis("land", "carol")
+    assert code == 0 and "Running check core: " in out, out
+    set_line(project, 'check_folder = "line"')
+    new_agent(project, "dave")
+    code, out = praxis("land", "dave")
+    assert code == 0 and "Skipping check core: it passed at " in out, out
+    assert named_runs(tmp_path) == ["core", "core"], "earned in the agent's folder, used by the line"
+    assert own_folders(project) == ["_line"]
 
 
 # --- the agent keeps working while its landing is checked ---------------------------------------------------------------
