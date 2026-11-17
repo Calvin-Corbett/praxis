@@ -207,8 +207,8 @@ def _named_checks_lines(ctx) -> list[str]:
 
     known = ctx.store.has("checkpasses")  # False while the database is left at an older Praxis's format (store.py)
     kept = checks.remembered(ctx.store) if known else {}
-    out = ["CHECKS (a landing runs every one of these whose paths match a file it changes, or that reads one; the "
-           "default too when no paths match)"]
+    out = [("CHECKS (a landing runs every one of these whose paths match a file it changes, or that reads one; the "
+            "default too when no paths match)")]
     for entry in ctx.cfg.checks:
         name, reads = entry["name"], entry.get("inputs")
         memory = f"{kept.get(name, 0)} pass(es) remembered"

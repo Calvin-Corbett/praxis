@@ -515,7 +515,8 @@ checks" above). `0` turns the audit off; then only the full check stands behind 
 run at the same time, in the same folder, while heavy job places are free. `false` runs them one after another.
 
 **What a landing changes, for the check.** A check command can also decide for itself, file by file. For every
-landing's check (`check` or a `checks` entry, a batch's one check, an early check) Praxis sets `PRAXIS_BASE`, the
+landing's check (`check` or every `checks` entry that runs, a batch's check, an early check, `praxis check`, and
+an audit, which is told what the landing it audits changed) Praxis sets `PRAXIS_BASE`, the
 commit of the main version the work was put on top of, and `PRAXIS_CHANGED_FILES`, the path of a text file listing
 the files the landing changes compared with that commit: one per line, from the top of the project, with forward
 slashes, in UTF-8. A deleted file is listed too, and a batch's check gets the files of all its agents together.

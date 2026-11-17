@@ -243,7 +243,8 @@ def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) 
         # with `speculate`, the next agent's check starts beside this one.
         plan = checks.plan(ctx.cfg, landing_changes)
         outcome = checks.run(ctx, row, folder, checked, plan, base=base, changed=landing_changes,
-                             wait_for=line.wait_for, before_run=lambda: line.start(checked, [row["name"]]))
+                             wait_for=line.wait_for,
+                             before_run=lambda checked=checked: line.start(checked, [row["name"]]))
         bad, log = outcome.failed, outcome.log
         if bad is not None and bad.code == NEEDS_THE_HUMAN:
             return _needs_the_human(ctx, row, bad.output, bad.log)

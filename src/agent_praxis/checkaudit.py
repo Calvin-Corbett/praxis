@@ -201,11 +201,15 @@ def describe(row, found: str = "") -> list[str]:
     return [
         f"check {name} passed from memory but fails when run: its inputs list is probably missing files"
         + (f" (found {found})." if found else "."),
-        f"{row['broken_agent']}'s landing (commit {(row['broken_commit'] or '')[:10]}) skipped it because it had "
-        "passed on the same files it says it reads. Run again on exactly that version, it fails. Its output: "
-        f"{row['broken_log']}",
-        f"Its remembered passes were dropped, and it now runs for every landing it is chosen for. Add the files it "
-        f"reads to its `inputs` in praxis.toml (or fix what the log shows), then run: praxis trust {name}",
+        (
+            f"{row['broken_agent']}'s landing (commit {(row['broken_commit'] or '')[:10]}) skipped it because it "
+            "had passed on the same files it says it reads. Run again on exactly that version, it fails. Its "
+            f"output: {row['broken_log']}"
+        ),
+        (
+            "Its remembered passes were dropped, and it now runs for every landing it is chosen for. Add the files "
+            f"it reads to its `inputs` in praxis.toml (or fix what the log shows), then run: praxis trust {name}"
+        ),
         "Praxis never undoes a landing by itself: if that landing broke the project, have an agent land a fix.",
     ]
 
