@@ -25,7 +25,12 @@ project modules a test file imports, and for each module the modules whose const
 constant is read, not called, so watching cannot see it). A source file no test was seen using is sent to the
 whole suite. The map holds what happened on the system that made it, so make it where the check runs.
 
-The map only chooses the quick check. The whole suite stays the safety net behind it (`full_check` in praxis.toml).
+What the map cannot know: it is as old as its last rebuild. When a landing makes one module call into another
+that it did not use before, the tests of the first are not yet listed for the second, and a later change to the
+second alone would skip them. So the map only chooses the quick check, and the whole suite stays the safety net
+behind it (`full_check` in praxis.toml, every few landings). Run `--rebuild` now and then, and after a change
+that rewires modules.
+
 Only the Python standard library is used here; `--rebuild` also needs pytest.
 """
 

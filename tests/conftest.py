@@ -69,14 +69,15 @@ _GIT_LEAKS = (
 @pytest.hookimpl(optionalhook=True)  # pytest-xdist's hook: without xdist it is simply never called
 def pytest_xdist_auto_num_workers(config) -> int:
     """How many workers `pytest -n auto` starts (needs pytest-xdist): three quarters of the CPU cores, at least 2,
-    so 12 on a PC with 16. A worker is not a busy core. The tests mostly wait: for the thousands of git and praxis
-    processes they start, for locks, for a landing's turn in the line. Eight workers kept only two to three cores
-    busy, so half the cores left time on the table.
+    so 12 on a PC with 16. A worker is not a busy core. On a disk the tests mostly wait: every git commit and every
+    database commit they make (thousands) waits for the disk, so eight workers kept only two to three cores busy.
 
-    Measured on a 16-core PC that other agents kept busy, the whole suite (376 tests) on Linux: 8 workers 380 s,
-    12 workers 243 s and 244 s, 16 workers 276 s and 252 s, 24 workers 257 s with one test failing. Above three
-    quarters nothing gets faster, and with more workers than cores tests that wait for each other start to time
-    out. xdist's own `auto` would start a worker for every core. `-n 8` still means 8."""
+    Measured on a 16-core PC that other agents kept busy (Linux in WSL, the whole suite, 2026-11-16). Temporary
+    files on the disk: 8 workers 380 s, 12 workers 243 s and 244 s, 16 workers 276 s and 252 s, 24 workers 257 s
+    with one test failing. Temporary files in memory (TMPDIR in /dev/shm), where nothing waits for a disk: 8 workers
+    32 to 91 s over four runs, 12 workers 34 to 75 s over four, 16 workers 45 s and 51 s, 24 workers 61 s and 69 s;
+    the spread is the other work on the machine. Above three quarters nothing gets faster either way. xdist's own
+    `auto` would start a worker for every core. `-n 8` still means 8."""
     from agent_praxis import load
 
     return max(2, load.cores() * 3 // 4)

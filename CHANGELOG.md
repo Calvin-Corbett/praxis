@@ -136,7 +136,9 @@
   `python -m pytest -n auto` runs the suite with a worker for three quarters of the CPU cores (12 on a PC with 16)
   instead of one test at a time. On a busy 16-core PC the suite, 33 minutes one test at a time on Windows, took
   about 4 minutes on Linux (WSL) with 12 workers; 8 workers took over 6 minutes, and 16 or 24 were no faster than
-  12. Plain `python -m pytest` still
+  12. Most of that time the tests wait for the disk. If you run them in WSL, give them a temporary folder in memory
+  (`TMPDIR=/dev/shm/praxis-tests python -m pytest -n auto`, after making that folder): the same suite then took
+  between 34 and 75 seconds, depending on what else the machine was doing. Plain `python -m pytest` still
   works. To make that safe every test now stands alone: a praxis command runs only inside the test's own temporary
   folder (child processes included), `PRAXIS_HOME` and git's global settings are the test's own, and settings left
   in the environment by whoever started the tests (`PRAXIS_AGENT`, `GIT_DIR`) are cleared. The tests no longer sign
