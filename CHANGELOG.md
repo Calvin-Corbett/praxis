@@ -3,6 +3,24 @@
 ## Unreleased
 
 ### New
+- **Your check can test only what a landing changes.** For every landing's check Praxis now sets `PRAXIS_BASE` (the
+  commit of the main version your work was put on top of) and `PRAXIS_CHANGED_FILES` (the path of a text file
+  listing the files the landing changes, one per line, from the top of the project). Your check command can read
+  the list and run only the tests those files can affect. A batch's one check gets the files of all its agents, an
+  early check gets them too, and the full check gets neither, because it tests everything. The list sits next to the
+  check's log in `.git/praxis/logs/`. If your check runs in WSL on Windows, add
+  `env = { WSLENV = "PRAXIS_CHANGED_FILES/p:PRAXIS_BASE" }` to `praxis.toml` so WSL sees them. Have such a check
+  run everything when it meets a file it does not know, and keep `full_check` behind it.
+- **Praxis's own quick check runs only the tests your change can affect.** `python tools/affected_tests.py --list
+  <file of changed files>` (or the file names as arguments) prints what to hand to pytest: a few test files, nothing
+  at all for a change no test can see (the README), or `tests` for the whole suite. It reads a map,
+  `tools/affected_tests.json`, made by running the suite once while every test file's use of the project files is
+  written down (`--rebuild`), child processes included. It runs the whole suite whenever it cannot be sure: a file
+  the map does not know, no list, a damaged map, or a change to `conftest.py`, `pyproject.toml`, `store.py`,
+  `cli.py`, the tool or the map. A changed test file always runs itself. If you add a source or test file, one test
+  fails until the map knows it: `python tools/affected_tests.py --add` puts it in at once, the safe way (a new test
+  file runs with every change, a new source file runs the whole suite), and `--rebuild` makes the map tight again.
+  The whole suite stays the safety net: run it as the `full_check`.
 - **The check can depend on what you change.** Add `checks = [{ paths = ["js/thermo.js", "css/**"], run = "npm run
   test:ui" }, ...]` to `praxis.toml`. For a landing Praxis runs the command of the FIRST entry whose `paths` match
   any file the landing changes, and your normal `check` when none does, so put the strictest entries first. Without
@@ -115,8 +133,10 @@
 - The project database is now format 3 (a new table for the heavy jobs). Praxis upgrades it by itself the first time
   it runs; an older Praxis then refuses the project instead of guessing.
 - **Praxis's own tests run across CPU cores.** `pip install ".[test]"` now also installs pytest-xdist, and
-  `python -m pytest -n auto` runs the suite with a worker for half the CPU cores (8 on a PC with 16) instead of one
-  test at a time: a 33-minute run took under 6 minutes on a busy 16-core Windows PC. Plain `python -m pytest` still
+  `python -m pytest -n auto` runs the suite with a worker for three quarters of the CPU cores (12 on a PC with 16)
+  instead of one test at a time. On a busy 16-core PC the suite, 33 minutes one test at a time on Windows, took
+  about 4 minutes on Linux (WSL) with 12 workers; 8 workers took over 6 minutes, and 16 or 24 were no faster than
+  12. Plain `python -m pytest` still
   works. To make that safe every test now stands alone: a praxis command runs only inside the test's own temporary
   folder (child processes included), `PRAXIS_HOME` and git's global settings are the test's own, and settings left
   in the environment by whoever started the tests (`PRAXIS_AGENT`, `GIT_DIR`) are cleared. The tests no longer sign

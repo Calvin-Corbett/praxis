@@ -98,13 +98,30 @@ def main_subjects(project: Path) -> list[str]:
     return git(project, "log", "--format=%s", "--reverse", "main").splitlines()
 
 
+def read_until(proc, text: str) -> str:
+    """What *proc* prints, read line by line up to and including the first line holding *text*."""
+    seen = ""
+    for line in proc.stdout:
+        seen += line
+        if text in line:
+            return seen
+    raise AssertionError(f"{text!r} was never printed:\n{seen}")
+
+
 def test_two_agents_land_together_with_one_check(project, tmp_path):
-    log = use_check(project, tmp_path)
+    gate = tmp_path / "gate"
+    log = use_check(project, tmp_path, gate=gate)
     new_agent(project, "alice")
     new_agent(project, "bob")
     procs, release = land_behind_a_ghost(project, ["alice", "bob"])
     release()
+    # The check waits for the gate, so bob has time to be told. A batch that is over before bob next looks at the
+    # line (a quick check on a fast disk) takes bob straight to its result, without this notice: that is right too.
+    told = read_until(procs[1], "taken into a batch")
+    gate.write_text("go")
+    told += procs[1].stdout.read()
     codes, outs = finish(procs)
+    outs[1] = told + outs[1]
     assert codes == [0, 0], outs
     assert runs(log) == 1, "one check for the whole batch"
     assert "together" in outs[0] and "alice, bob" in outs[0]
@@ -170,7 +187,8 @@ def test_batch_max_caps_the_batch(project, tmp_path):
     codes, outs = finish(procs)
     assert codes == [0, 0, 0], outs
     assert runs(log) == 2, "alice and bob together, then carol"
-    assert "taken into a batch" in outs[1] and "taken into a batch" not in outs[2]
+    # Not the "taken into a batch" notice: a batch that is over within one look at the line never prints it.
+    assert "together with alice, bob" in outs[1] and "together" not in outs[2]
 
 
 def test_a_batch_member_that_clashes_is_left_out_and_lands_on_its_own_turn(project, tmp_path):

@@ -68,15 +68,18 @@ _GIT_LEAKS = (
 
 @pytest.hookimpl(optionalhook=True)  # pytest-xdist's hook: without xdist it is simply never called
 def pytest_xdist_auto_num_workers(config) -> int:
-    """How many workers `pytest -n auto` starts (needs pytest-xdist): half the CPU cores, at least 2, so 8 on a PC
-    with 16. That is the ceiling Praxis itself uses for heavy jobs (load.default_max). A worker is more than one
-    busy core: between them the workers start thousands of git and praxis processes, and the system checks every
-    one of them and every file they write. The aim is a machine no more than about three quarters busy, with room
-    for the other agents working on it; xdist's own `auto` would start a worker for every core. `-n 8` still
-    means 8."""
+    """How many workers `pytest -n auto` starts (needs pytest-xdist): three quarters of the CPU cores, at least 2,
+    so 12 on a PC with 16. A worker is not a busy core. The tests mostly wait: for the thousands of git and praxis
+    processes they start, for locks, for a landing's turn in the line. Eight workers kept only two to three cores
+    busy, so half the cores left time on the table.
+
+    Measured on a 16-core PC that other agents kept busy, the whole suite (376 tests) on Linux: 8 workers 380 s,
+    12 workers 243 s and 244 s, 16 workers 276 s and 252 s, 24 workers 257 s with one test failing. Above three
+    quarters nothing gets faster, and with more workers than cores tests that wait for each other start to time
+    out. xdist's own `auto` would start a worker for every core. `-n 8` still means 8."""
     from agent_praxis import load
 
-    return load.default_max()
+    return max(2, load.cores() * 3 // 4)
 
 
 def child_env(**more: str) -> dict[str, str]:

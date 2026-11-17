@@ -291,7 +291,8 @@ belongs to another project) is ignored and the call waits in line as usual.
 ### The full check
 
 Quick checks make a landing fast because they do not test everything every time (`checks` picks a check by the
-files that changed, the check cache skips a tree that already passed, a batch is checked once). The full check is
+files that changed, a check may test only what `PRAXIS_CHANGED_FILES` says the landing changes, the check cache
+skips a tree that already passed, a batch is checked once). The full check is
 the safety net behind them: one command that tests the WHOLE project, run on the main version every so often. Set
 it in `praxis.toml`:
 
@@ -426,6 +427,20 @@ For a landing Praxis looks at the files the landing changes and runs the `run` c
 entries that must always win first. Patterns are read from the top of the project like the other path settings
 (`*` stays inside one folder, `**` spans folders). Without `checks`, nothing changes. The landing output and
 `praxis status` name the check that was used, for example "check passed (check 1 of `checks` (css/**))".
+
+**What a landing changes, for the check.** A check command can also decide for itself, file by file. For every
+landing's check (`check` or a `checks` entry, a batch's one check, an early check) Praxis sets `PRAXIS_BASE`, the
+commit of the main version the work was put on top of, and `PRAXIS_CHANGED_FILES`, the path of a text file listing
+the files the landing changes compared with that commit: one per line, from the top of the project, with forward
+slashes, in UTF-8. A deleted file is listed too, and a batch's check gets the files of all its agents together.
+So a check can run only the tests those files can affect, for example
+`pytest $(python tools/affected_tests.py --list "$PRAXIS_CHANGED_FILES")` with a tool of your own that knows your
+project. The list sits next to the check's log in `.git/praxis/logs/` and goes when that log goes;
+`git diff --name-only $PRAXIS_BASE HEAD` in the folder being checked gives the same names. The full check gets
+neither variable, because it tests everything. Two rules keep such a check safe: when it meets a file it knows
+nothing about, or gets no list, it runs everything; and `full_check` is set behind it. On Windows a check that runs
+in WSL sees only the variables you name in `WSLENV`: add `env = { WSLENV = "PRAXIS_CHANGED_FILES/p:PRAXIS_BASE" }`
+(the `/p` turns the Windows path into a WSL one).
 
 **`full_check`** and **`full_check_every`** (default `""` and `0`): the command that tests the whole project, and
 after how many landings Praxis runs it on the main version by itself (see "The full check" above). `0` means only

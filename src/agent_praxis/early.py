@@ -236,7 +236,8 @@ def _check_early(ctx: Ctx, candidate: str, row, tip: str, fork: str) -> None:
         )
         return
     checked, tree = gitops.rev(folder, "HEAD"), _tree(folder, "HEAD")
-    command = ctx.cfg.check_for(gitops.changed_between(folder, candidate, "HEAD"))[0].strip()
+    changed = gitops.changed_between(folder, candidate, "HEAD")  # on top of the work that is landing now
+    command = ctx.cfg.check_for(changed)[0].strip()
     if not command or not tree or checked == candidate:
         ctx.say(f"{name} has nothing to check early.")
         return
@@ -254,7 +255,7 @@ def _check_early(ctx: Ctx, candidate: str, row, tip: str, fork: str) -> None:
         )
         cfg = dataclasses.replace(ctx.cfg, env={**ctx.cfg.env, heavy.TOKEN_ENV: token})
         inner = dataclasses.replace(ctx, cfg=cfg)
-        code, _output, log = L._run_check(inner, row, folder, command)
+        code, _output, log = L._run_check(inner, row, folder, command, candidate, changed)
         L._put_back_check_rewrites(inner, row, folder)
         if code != 0:
             ctx.say(

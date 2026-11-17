@@ -46,6 +46,7 @@ TAIL_LINES = 40
 TAIL_BYTES = 256 * 1024  # how much of the end of a check's output is read back (the rest stays in the log)
 KEEP_LOGS = 200
 KEEP_LOG_BYTES = 1024 ** 3  # the check logs together stay under this (oldest go first), apart from the newest one
+CHANGED_LIST = ".changed.txt"  # a check's list of changed files, next to its log: <the log's name>.changed.txt
 HEARTBEAT_SECONDS = 60  # while a check runs, say it is still running this often, so nobody thinks it hung
 RETRIES_WHEN_MAIN_MOVES = 3
 NEEDS_THE_HUMAN = 3  # a check's exit code saying: the problem is not this agent's doing, a person must look
@@ -251,7 +252,7 @@ def _take_turn(ctx: Ctx, row, folder: Path, progress: dict, finish: bool, line) 
         elif command:
             line.start(checked, [row["name"]])  # with `speculate`: the next agent's check starts beside this one
             ctx.say(f"Running the check{named}: {command}")
-            code, output, log = _run_check(ctx, row, folder, command)
+            code, output, log = _run_check(ctx, row, folder, command, base, landing_changes)
             _put_back_check_rewrites(ctx, row, folder)  # pass or fail, so they are never saved as the agent's work
             if code == NEEDS_THE_HUMAN:
                 return _needs_the_human(ctx, row, output, log)
@@ -643,17 +644,33 @@ def _new_log(logs: Path, agent: str) -> Path:
     return log
 
 
-def _run_check(ctx: Ctx, row, folder: Path, command: str) -> tuple[int, str, str]:
-    """(the check's exit code, the end of its output, its log)."""
+def _changed_list(log: Path) -> Path:
+    """Where the list of changed files for the check that writes *log* is kept: next to it, and gone with it."""
+    return log.with_name(log.stem + CHANGED_LIST)
+
+
+def _run_check(ctx: Ctx, row, folder: Path, command: str, base: str | None = None,
+               changed: list[str] | None = None) -> tuple[int, str, str]:
+    """(the check's exit code, the end of its output, its log). With *base*, the main version the candidate is
+    built on, the command is told what the landing changes: PRAXIS_BASE is that commit, and PRAXIS_CHANGED_FILES
+    names a text file listing the files in *changed*, one per line. Without it (the full check, which tests
+    everything) neither is set, not even when Praxis itself was started with them."""
     # PRAXIS_CHECK: a `praxis run --heavy` inside the check knows a landing waits on it, and goes first (heavy.py).
     env = hooks.command_env(ctx.cfg, PRAXIS_AGENT=row["name"], PRAXIS_TASK=row["task"], PRAXIS_CHECK="1")
     logs = ctx.store.dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = _new_log(logs, row["name"])
+    env.pop("PRAXIS_BASE", None)
+    env.pop("PRAXIS_CHANGED_FILES", None)
+    if base:
+        env.update(PRAXIS_BASE=base, PRAXIS_CHANGED_FILES=str(_changed_list(log)))
     plan = shells.prepare(ctx, command, env, folder)  # on Windows a bare `bash` means Git Bash, not WSL
     with open(log, "wb") as out:
         out.write(plan.header(command))
         out.flush()
+        if base:  # written once the log is there: a list without its log is taken for a leftover and removed
+            with open(_changed_list(log), "w", encoding="utf-8", newline="\n") as listed:
+                listed.writelines(f"{name}\n" for name in changed or [])
         # No time limit, on purpose. No keyboard either: a check that waits for a key (`pause`) would hold the
         # landing line forever. The output goes straight to the log, so a huge output never fills memory.
         guard = _CheckEndsWithMe()
@@ -741,6 +758,12 @@ def _prune_logs(logs: Path, keep: Path | None = None) -> None:
             continue
         extra -= 1
         total -= size
+    for listed in logs.glob("*" + CHANGED_LIST):  # a list of changed files goes when the log it belongs to has gone
+        if not listed.with_name(listed.name[: -len(CHANGED_LIST)] + ".log").exists():
+            try:
+                listed.unlink()
+            except OSError:
+                pass
 
 
 def _changed_during_check(ctx: Ctx, row, folder: Path, checked: str) -> str | None:

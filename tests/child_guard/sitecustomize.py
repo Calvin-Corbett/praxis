@@ -41,4 +41,14 @@ def _guard() -> None:
     os._exit(EXIT_CODE)
 
 
+def _watch() -> None:
+    """`python tools/affected_tests.py --rebuild` asks every Python a test starts to write down the project files
+    it uses (see affected_watch.py next to this file). Without that request nothing is loaded."""
+    if os.environ.get("AFFECTED_TESTS_WATCH"):
+        import affected_watch
+
+        affected_watch.install()
+
+
 _guard()
+_watch()

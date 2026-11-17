@@ -413,7 +413,8 @@ class _Run:
 
         ctx, folder = self.ctx, self.folder
         self.line.stop()  # a new candidate: an early check built on the last one is of no use
-        command = ctx.cfg.check_for(gitops.changed_between(folder, base, "HEAD"))[0].strip()
+        changed = gitops.changed_between(folder, base, "HEAD")  # what the whole group changes, together
+        command = ctx.cfg.check_for(changed)[0].strip()
         self.used = command
         if not command:
             return 0, "", None
@@ -424,7 +425,7 @@ class _Run:
             return 0, "", None
         self.line.start(checked, [m.name for m in built])  # the next agent's check starts beside this one
         ctx.say(f"Running the check once for {len(built)} agent(s) ({', '.join(m.name for m in built)}): {command}")
-        code, output, log = L._run_check(ctx, self.head.row, folder, command)
+        code, output, log = L._run_check(ctx, self.head.row, folder, command, base, changed)
         L._put_back_check_rewrites(ctx, self.head.row, folder)
         if code == 0:
             moved = L._changed_during_check(ctx, self.head.row, folder, checked)

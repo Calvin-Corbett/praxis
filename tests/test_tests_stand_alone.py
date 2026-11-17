@@ -91,7 +91,7 @@ def test_nothing_is_left_over_in_the_environment(tmp_path):
     assert Path(os.environ["PRAXIS_TEST_AREA"]) == tmp_path.resolve()
 
 
-@pytest.mark.parametrize(("cores", "workers"), [(16, 8), (32, 16), (6, 3), (2, 2), (1, 2), (None, 2)])
-def test_n_auto_starts_a_worker_for_half_the_cores_and_never_one_for_each(cores, workers, monkeypatch):
+@pytest.mark.parametrize(("cores", "workers"), [(16, 12), (32, 24), (6, 4), (4, 3), (2, 2), (1, 2), (None, 2)])
+def test_n_auto_starts_a_worker_for_three_quarters_of_the_cores_and_never_one_for_each(cores, workers, monkeypatch):
     monkeypatch.setattr(os, "cpu_count", lambda: cores)
     assert conftest.pytest_xdist_auto_num_workers(SimpleNamespace()) == workers
