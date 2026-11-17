@@ -84,7 +84,8 @@ def test_a_third_job_waits_while_two_run_and_says_so(project, tmp_path):
         store = Store(project / ".git" / "praxis")
         try:
             deadline = time.time() + 60
-            while time.time() < deadline and len(heavy.rows(store)) < 2:
+            # A job is in the line a moment before it starts: wait for both to have started, not just to be there.
+            while time.time() < deadline and len([r for r in heavy.rows(store) if r["started"]]) < 2:
                 time.sleep(0.2)
             assert len([r for r in heavy.rows(store) if r["started"]]) == 2
             third = praxis_process(project, "run", "--heavy", *_py("print('third ran')"))
