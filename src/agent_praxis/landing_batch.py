@@ -531,6 +531,17 @@ class _Run:
             self.words[bad.log] = bad.failure()
             return bad.code, bad.output, bad.log
         if outcome.moved:
+            if self.head not in built:
+                # The check was of other agents' work only: the head's own result (it landed, or was refused, in
+                # an earlier group of this batch) stands, and no second failure is written against it.
+                files = [line for line in outcome.moved.splitlines() if line.startswith("  - ")]
+                ctx.say(
+                    f"Files changed in {self.head.name}'s folder while the check of {', '.join(names)} ran in it, so "
+                    "that check does not count: they land on their own turn."
+                    + "".join(f"\n{line}" for line in files)
+                    + f"\n{self.head.name}'s own result stands. Do not change the folder while a landing runs."
+                )
+                raise Abort
             L._fail(ctx, self.head.row, "changed-during-check", "files changed while the check ran", outcome.moved)
             self.head.outcome = "refused"
             raise Abort

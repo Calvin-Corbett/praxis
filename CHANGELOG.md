@@ -175,6 +175,18 @@
 - **A second `praxis land` for an agent whose landing is still running says so.** While a landing runs a batch, its
   agent's folder is on no branch on purpose; a second `praxis land` used to answer with advice to switch the folder
   back by hand. It now says the agent is already landing, and changes nothing.
+- **One agent's edit during a batch's check costs the others less.** A batch's check runs in the folder of the agent
+  at the front. One edit there while it ran refused that agent and threw the passed check away for everybody else in
+  the batch. Praxis still never lands files a check may not have tested, so a check that reads the whole project runs
+  again for the others. But a named check that lists the files it reads (`inputs`) now keeps its pass when none of
+  the files that changed is one it reads: the others land on their own turn with "Skipping check <name>: it passed
+  ...", without waiting for it again. The same holds for a single landing that is refused for files changed during
+  its checks: the checks that cannot have read them are not run again.
+- **An agent whose work a batch already landed is no longer told it did not land.** When a batch was split to find
+  the work that broke its check, and a file changed in the front agent's folder during a later check of other
+  agents' work, the front agent got "NOT landed: files changed while the check ran", exit code 2 and a failed try
+  on its record, although its own work had landed minutes before. Its result now stands, and it is told that the
+  later check does not count for the agents it was checking.
 
 ### Changed
 - **A background landing no longer makes the commands under it run its own Praxis version.** `praxis land

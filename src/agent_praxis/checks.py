@@ -346,8 +346,9 @@ def run(
     batch: list[str] | None = None,
 ) -> Outcome:
     """Bring the candidate *checked* (the commit *folder* holds) through *checks*: a check with a remembered pass is
-    skipped, and says so; the others run in *folder*, and those that pass are remembered. Nothing is remembered when
-    files git tracks changed while they ran (`moved` then says what). A failure stops the checks not yet started.
+    skipped, and says so; the others run in *folder*, and those that pass are remembered. When files git tracks
+    changed while they ran (`moved` then says what), only a pass that cannot have read them is (see _read_none_of).
+    A failure stops the checks not yet started.
 
     *base* is the main version the candidate is built on and *changed* the files it changes from there: every
     check command is told both (see _run_one). *wait_for(tree, signature, passed)* is asked first when something is left to run (an early check of
@@ -375,10 +376,37 @@ def run(
     passed = [step for step in todo if step.how == "passed"]
     if passed:
         outcome.moved = L._changed_during_check(ctx, row, folder, checked)
-        if outcome.moved is None:
-            for step in passed:
-                remember(ctx.store, step.check, keys, step.log)  # only a pass is remembered, never a failure
+        if outcome.moved is not None:
+            passed = _read_none_of(passed, _touched(folder, checked))
+        for step in passed:
+            remember(ctx.store, step.check, keys, step.log)  # only a pass is remembered, never a failure
     return outcome
+
+
+def _touched(folder: Path, checked: str) -> list[str] | None:
+    """Every file in *folder* that is not as the candidate *checked* has it: changed, deleted, saved in a new commit
+    on top, or new and unknown to git. None when git cannot say."""
+    try:
+        return sorted({*gitops.changed_between(folder, checked, "HEAD"), *gitops.dirty_files(folder)})
+    except gitops.GitError:
+        return None
+
+
+def _read_none_of(passed: list[Step], touched: list[str] | None) -> list[Step]:
+    """Files changed in the folder while the checks ran, so a pass is not known to be a pass of the candidate, and
+    nothing lands from it. One kind of pass still stands: a named check that says which files it reads (`inputs`),
+    when none of the files that changed is one of them. It read exactly the candidate's files. Remembering it means
+    the agents checked together with the one whose folder changed do not pay for that check again: on their own
+    turn it is found by the files it reads, as any remembered pass is."""
+    if touched is None:
+        return []
+    return [
+        step
+        for step in passed
+        if step.check.name
+        and step.check.inputs is not None
+        and not any(paths.matches_from_top(path, list(step.check.inputs)) for path in touched)
+    ]
 
 
 class _InThread:

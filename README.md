@@ -770,6 +770,10 @@ example `check_may_change = ["ProjectSettings/*.asset"]`. Paths are read from th
 inside one folder and `**` spans folders, so `*.cfg` means only .cfg files at the top. After every check Praxis
 puts those files back the way they were committed (keeping a copy in `.git/praxis/kept/`, in case an agent had
 edited one), and lands. The message names the files and gives the exact line.
+In a batch the check runs in the folder of the agent at the front, so only that agent is refused; the others land
+on their own turn. A check that reads the whole project runs again for them, because a pass with edited files in
+the folder is not known to be a pass of what would land. A named check that lists what it reads (`inputs`) keeps
+its pass when none of the edited files is one it reads, so the others do not wait for it a second time.
 
 **"submodules ... have commits that exist nowhere else"** or **"... changes that are not committed inside them"**
 An agent changed something inside a submodule (an addon or plugin kept in its own git project) and did not

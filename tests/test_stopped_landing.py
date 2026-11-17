@@ -8,10 +8,13 @@ agent waiting in the batch is never told that its work landed.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from conftest import edit, folder, git, praxis
 from test_batch import finish, land_behind_a_ghost, new_agent, queue_names, runs, use_check, wait_for
+from test_inputs import named_check, use_checks
+from test_inputs import runs as named_runs
 
 from agent_praxis.landing_queue import Ticket, clear_dead, note_file, write_note
 from agent_praxis.store import Store
@@ -310,3 +313,132 @@ def test_levelling_a_folder_never_writes_over_a_new_file_git_does_not_know(proje
     assert codes == [0, 0], outs
     assert (folder(project, "bob") / "scripts" / "alice.gd").read_text() == "bob's own notes\n", outs[1]
     assert "folder now matches the main version" not in outs[1]
+
+
+# --- an edit in the front agent's folder while a batch's check runs there ---------------------------------------------
+
+
+def _both_in_line_then_edit(project, started, edited: str, text: str):
+    """alice heads a batch with bob; once its check has started (*started* says so), a file in alice's folder is
+    edited. Returns the two processes; the caller lets the check finish."""
+    new_agent(project, "alice")
+    new_agent(project, "bob")
+    procs, release = land_behind_a_ghost(project, ["alice", "bob"])
+    release()
+    wait_for(started, "the batch's check to start")
+    with open(folder(project, "alice") / edited, "a") as handle:
+        handle.write(text)  # the agent kept editing while its landing ran
+    return procs
+
+
+def test_an_edit_during_a_batch_check_refuses_that_agent_and_the_whole_project_check_runs_again(project, tmp_path):
+    """A check that reads the whole project cannot be known to have tested the candidate: nothing is kept."""
+    gate = tmp_path / "go"
+    log = use_check(project, tmp_path, gate=gate)
+    procs = _both_in_line_then_edit(project, lambda: runs(log) == 1, "project.godot", "; edited\n")
+    gate.write_text("go")
+    codes, outs = finish(procs)
+    assert codes == [2, 0], outs
+    assert "NOT landed: files changed while the check ran" in outs[0] and "project.godot" in outs[0], outs[0]
+    assert "Landed: bob's work" in outs[1] and "files changed" not in outs[1], "only alice is refused"
+    assert runs(log) == 2, "bob's work alone was never checked, so it is checked on his own turn"
+    assert (project / "scripts" / "bob.gd").exists() and not (project / "scripts" / "alice.gd").exists()
+    assert "; edited" in (folder(project, "alice") / "project.godot").read_text(), "her edit is still there"
+
+
+def _a_check_for_each(project: Path, tmp_path: Path) -> Path:
+    """Two named checks, one after the other: `alice` reads scripts/alice.gd, `bob` reads scripts/bob.gd. Each waits
+    for a gate in the folder this returns."""
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    entries = [named_check(tmp_path, name, [f"scripts/{name}.gd"], gates=gates) for name in ("alice", "bob")]
+    use_checks(project, *entries, checks_together="false")
+    return gates
+
+
+def test_an_edit_no_check_reads_costs_the_other_agents_no_second_check(project, tmp_path):
+    """Named checks say what they read. An edit to a file none of them reads cannot have changed what they found, so
+    their passes are kept for the files they read: bob lands on his own turn without his check running again."""
+    gates = _a_check_for_each(project, tmp_path)
+    procs = _both_in_line_then_edit(project, lambda: named_runs(tmp_path), "project.godot", "; edited\n")
+    (gates / "all").write_text("go")
+    codes, outs = finish(procs)
+    assert codes == [2, 0], outs
+    assert "NOT landed: files changed while the check ran" in outs[0], outs[0]
+    assert "Skipping check bob: it passed at " in outs[1] and "Landed: bob's work" in outs[1], outs[1]
+    assert sorted(named_runs(tmp_path)) == ["alice", "bob"], "each check ran once, for the batch"
+    code, out = praxis("land", "alice")  # her edit is saved and lands; her own check read none of it either
+    assert code == 0, out
+    assert "Skipping check alice: it passed at " in out, out
+    assert sorted(named_runs(tmp_path)) == ["alice", "bob"]
+    assert "; edited" in (project / "project.godot").read_text()
+
+
+def test_an_edit_to_a_file_a_check_reads_is_never_taken_for_a_pass(project, tmp_path):
+    gates = _a_check_for_each(project, tmp_path)
+    started = lambda: named_runs(tmp_path)
+    procs = _both_in_line_then_edit(project, started, "scripts/alice.gd", "# edited while the check ran\n")
+    (gates / "all").write_text("go")
+    codes, outs = finish(procs)
+    assert codes == [2, 0], outs
+    assert "Skipping check bob: it passed at " in outs[1], "bob's check read nothing that changed"
+    git(folder(project, "alice"), "checkout", "--", "scripts/alice.gd")  # exactly the files the batch checked again
+    code, out = praxis("land", "alice")
+    assert code == 0, out
+    assert "Running check alice: " in out and "Skipping check alice" not in out, "its pass was not remembered"
+    assert sorted(named_runs(tmp_path)) == ["alice", "alice", "bob"]
+
+
+NUMBERED_CHECK = """\
+import os, pathlib, sys, time
+log, gates = sys.argv[1], sys.argv[2]
+with open(log, "a") as f:
+    f.write("run\\n")
+number = len(open(log).read().splitlines())
+for _ in range(1200):
+    if os.path.exists(os.path.join(gates, str(number))) or os.path.exists(os.path.join(gates, "all")):
+        break
+    time.sleep(0.05)
+bad = [str(p) for p in pathlib.Path("scripts").glob("*.gd") if "BROKEN" in p.read_text()]
+sys.exit(1 if bad else 0)
+"""
+
+
+def test_an_agent_that_landed_in_the_batch_stays_landed_when_a_later_check_in_its_folder_is_spoiled(project, tmp_path):
+    """alice, bob, carol (broken) and dave land together. The batch fails, alice and bob land as a pair, carol is
+    refused, and while dave's work is checked alone in alice's folder a file there is edited. That check does not
+    count, so dave lands on his own turn; alice's landing is not turned into a failure."""
+    script, log, gates = tmp_path / "numbered.py", tmp_path / "check-runs.log", tmp_path / "gates"
+    script.write_text(NUMBERED_CHECK)
+    gates.mkdir()
+    command = f'"{sys.executable}" "{script}" "{log}" "{gates}"'
+    toml = project / "praxis.toml"
+    lines = [f"check = '{command}'" if ln.startswith("check =") else ln for ln in toml.read_text().splitlines()]
+    toml.write_text("\n".join(ln for ln in lines if not ln.startswith("batch_max =")) + "\nbatch_max = 4\n")
+    new_agent(project, "alice")
+    new_agent(project, "bob")
+    new_agent(project, "carol", "BROKEN\n")
+    new_agent(project, "dave")
+    for number in range(1, 4):  # the whole batch, alice + bob, carol alone (carol + dave: the known failure)
+        (gates / str(number)).write_text("go")
+    procs, release = land_behind_a_ghost(project, ["alice", "bob", "carol", "dave"])
+    release()
+    wait_for(lambda: runs(log) == 4, "dave's check, alone, to start")
+    with open(folder(project, "alice") / "project.godot", "a") as handle:
+        handle.write("; edited\n")
+    (gates / "all").write_text("go")
+    codes, outs = finish(procs)
+    assert codes == [0, 0, 2, 0], outs
+    assert "Landed: alice's work" in outs[0] and "NOT landed" not in outs[0], outs[0]
+    assert "that check does not count" in outs[0] and "dave" in outs[0], "alice's process says what happened"
+    assert "Landed: dave's work" in outs[3], outs[3]
+    assert runs(log) == 5, "dave's work is checked again on his own turn"
+    store = Store(project / ".git" / "praxis")
+    try:
+        rows = store.rows("SELECT ok, kind FROM landings WHERE agent = 'alice'")
+    finally:
+        store.close()
+    assert [(r["ok"], r["kind"]) for r in rows] == [(1, "landed")], "no failure is written against alice"
+    for name in ("alice", "bob", "dave"):
+        assert (project / "scripts" / f"{name}.gd").exists()
+    assert not (project / "scripts" / "carol.gd").exists()
