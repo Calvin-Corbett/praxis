@@ -158,7 +158,7 @@ class Own:
                 lines = later.stdout.strip().splitlines()
                 ctx.say(
                     f"{len(lines)} commit(s) were saved in {name}'s folder after this landing started. No check "
-                    f"tested them, so they did not land. They are kept on {branch}, on top of what landed:\n"
+                    f"tested them, so they did not land. They are kept on {branch}:\n"
                     + "\n".join(f"  - {line}" for line in lines[:20])
                     + f"\nLand them when they are ready: praxis land {name}"
                 )

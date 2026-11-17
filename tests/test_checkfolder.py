@@ -118,8 +118,12 @@ def test_the_check_runs_in_the_lines_one_folder_on_exactly_the_files_being_lande
     edit(line / "cache" / "warm.txt", "what a tool cached during the first check\n")  # git ignores it
     edit(line / "scripts" / "left.gd", "extends Node\n")  # git neither tracks nor ignores it
     edit(line / "scripts" / "player.gd", "left changed by the first check\n")  # a tracked file left changed
+    untouched = (line / "scripts" / "enemy.gd").stat().st_mtime_ns
     code, out = praxis("land", "bob")
     assert code == 0, out
+    assert (line / "scripts" / "enemy.gd").stat().st_mtime_ns == untouched, (
+        "a file the new landing does not change is not written again: a tool that goes by file times rebuilds nothing"
+    )
     assert log.read_text().splitlines() == ["_line 0 0", "_line 1 0"], "the cache is kept, the leftover is gone"
     assert (line / "cache" / "warm.txt").exists() and not (line / "scripts" / "left.gd").exists()
     assert git(line, "status", "--porcelain") == "", "only the files being landed, and what git ignores"
