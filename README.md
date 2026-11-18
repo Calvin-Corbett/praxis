@@ -1,31 +1,21 @@
 # Praxis
 
-**Let several AI agents build your game at the same time, without breaking each other's work.**
+**Run several coding agents on one Git project and land their work through your own checks.**
 
-You tell Claude Code, Codex, Cursor or any other AI coding agent what to build. That works well with one
-agent. With two or three at once, things go wrong: one agent overwrites another's change, a level file gets
-edited by two agents and ends up broken, and something that worked yesterday stops working.
+Use Claude Code, Codex, Cursor or another CLI agent. Praxis gives each agent a Git worktree, tracks which files
+it has claimed, and locks assets such as scenes and 3D models that need one editor at a time.
 
-Praxis is the coordination layer for AI agents. It runs no AI model of its own, and it is not a harness: it has
-no tools, skills or prompts. It sits above the agents you already use (Claude Code, Codex, Cursor...) and keeps
-them from breaking each other's work. It does five things:
+When work is ready, the landing queue checks it against the latest main branch. You can check waiting changes
+together, reuse passing checks when their inputs match, and limit how many heavy jobs share the machine.
+Run `praxis status` to see who is working, what is waiting, and which changes need attention.
 
-1. **Each agent gets its own copy of the project to work in**, so they never type over each other.
-2. **Each agent says which files it will change ("claims" them) before it starts**, so everyone can see who
-   is working on what. Code (text) files can be shared: two agents may edit the same file at once, and Praxis
-   tells each one who else is working on it.
-3. **Files that cannot be combined** (scenes, levels, prefabs, 3D models, textures, sounds) are **locked**:
-   only one agent at a time may hold one. Praxis says no to a second agent and names who has it.
-4. **Finished work goes through a line, one agent at a time.** Praxis puts the work on top of the newest
-   version, runs your project's check (a build or test command), and only keeps the work if the check passes.
-   If two agents changed the same lines of a shared file, the second to land is told which files clash and
-   whose landing they clash with, and fixes it. If anything fails, the agent gets the error text and its work
-   is kept.
-5. **When an agent keeps failing the same way, Praxis pauses it** and tells you, in plain words, what it needs.
+[Praxis 0.5.0 release notes](https://github.com/Calvin-Corbett/praxis/releases/tag/v0.5.0) · [Changelog](CHANGELOG.md)
 
-You never have to read code to use it. `praxis status` tells you what is going on.
+Agents can share a text file. If two changes conflict, Praxis identifies the files and the landing they
+conflict with. A failed check returns its output to the agent and preserves its work. Repeated failures pause
+that agent and appear in the status report.
 
-You need: **git** (Praxis builds on it) and **Python 3.10 or newer**. It works on Windows, macOS and Linux.
+Praxis requires **Git and Python 3.10 or newer** and runs on Windows, macOS and Linux.
 
 ---
 

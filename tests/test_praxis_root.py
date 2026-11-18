@@ -32,16 +32,19 @@ from agent_praxis.store import Store
 
 DECOY = "Z:/somebody/elses/folder"  # what is in the environment of whoever runs `praxis land`: it must never be seen
 
-# A short fake check. Each run writes one line: the PRAXIS_ROOT it was given and the folder it runs in. It waits for
+# A short fake check. Each run records the PRAXIS_ROOT it was given and the folder it runs in. It waits for
 # a gate file named "all" when it is given a folder of gates, and fails when a script says *word*.
 RECORD = """\
 import json, os, pathlib, sys, time
-log, word, gates = sys.argv[1], sys.argv[2], sys.argv[3]
+directory, word, gates = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 told = {key: os.environ.get(key) for key in ("PRAXIS_ROOT", "PRAXIS_AGENT", "PRAXIS_TASK", "PRAXIS_CHECK",
                                              "PRAXIS_BASE", "PRAXIS_CHANGED_FILES")}
 told["cwd"] = os.getcwd()
-with open(log, "a", encoding="utf-8") as out:
-    out.write(json.dumps(told) + "\\n")
+directory.mkdir(exist_ok=True)
+record = directory / f"{time.time_ns()}-{os.getpid()}.json"
+pending = record.with_suffix(".tmp")
+pending.write_text(json.dumps(told), encoding="utf-8")
+pending.replace(record)
 if gates != "-":
     for _ in range(1200):
         if os.path.exists(os.path.join(gates, "all")):
@@ -70,10 +73,10 @@ def _no_background_work_left_running(tmp_path):
 
 
 def command(tmp_path: Path, word: str = "BROKEN", gates: Path | None = None, name: str = "record.py") -> str:
-    """The shell line of the fake check: it adds a line to told.jsonl in *tmp_path* on every run."""
+    """The shell line of the fake check, which publishes one complete record per run."""
     script = tmp_path / name
     script.write_text(RECORD)
-    return f'"{sys.executable}" "{script.as_posix()}" "{(tmp_path / "told.jsonl").as_posix()}" {word} {gates or "-"}'
+    return f'"{sys.executable}" "{script.as_posix()}" "{(tmp_path / "records").as_posix()}" {word} {gates or "-"}'
 
 
 def record_with(project: Path, tmp_path: Path, setting: str = "check", **kw) -> None:
@@ -81,8 +84,7 @@ def record_with(project: Path, tmp_path: Path, setting: str = "check", **kw) -> 
 
 
 def told(tmp_path: Path) -> list[dict]:
-    log = tmp_path / "told.jsonl"
-    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    return [json.loads(record.read_text(encoding="utf-8")) for record in sorted((tmp_path / "records").glob("*.json"))]
 
 
 def only_the_main_folder(seen: list[dict], project: Path) -> None:
@@ -271,7 +273,7 @@ def test_the_full_checks_scratch_folder_setup_and_the_search_for_the_culprit_are
 def test_an_audit_of_a_remembered_pass_is_told_the_main_folder(project, tmp_path):
     script = tmp_path / "named.py"
     script.write_text(RECORD)
-    run = f'"{sys.executable}" "{script.as_posix()}" "{(tmp_path / "told.jsonl").as_posix()}" BROKEN -'
+    run = f'"{sys.executable}" "{script.as_posix()}" "{(tmp_path / "records").as_posix()}" BROKEN -'
     use_checks(project, '{ name = "core", paths = ["**"], inputs = ["scripts/player.gd"], run = \'' + run + "' }",
                audit_every="1")
     new_agent(project, "alice")
@@ -291,7 +293,7 @@ def test_an_audit_of_a_remembered_pass_is_told_the_main_folder(project, tmp_path
 def test_every_named_check_that_runs_beside_another_is_told_the_main_folder(project, tmp_path):
     script = tmp_path / "named.py"
     script.write_text(RECORD)
-    log = (tmp_path / "told.jsonl").as_posix()
+    log = (tmp_path / "records").as_posix()
     entries = [
         '{ name = "one", paths = ["**"], inputs = ["scripts/player.gd"], run = \'"' + sys.executable
         + '" "' + script.as_posix() + '" "' + log + '" BROKEN -\' }',

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-praxis"
-version = "0.4.0"
-description = "Lets several AI coding agents (Claude Code, Codex, Cursor, any CLI agent) work on one git project without breaking each other's work."
+version = "0.5.0"
+description = "Coordinate coding agents in Git worktrees with file claims, asset locks, checked batch landings, and a shared queue for heavy jobs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

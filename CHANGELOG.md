@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+This release adds batch landings, reusable check results and a shared limit for heavy jobs.
+The landing queue can check changes in its own worktree, so an agent can keep editing while its saved work is tested.
 
 ### New
 - **The landing line can check in a folder of its own, so you can keep working while your landing is checked.**
@@ -193,6 +196,8 @@
   naming both, and print the two `git config` lines that set the project's identity.
 
 ### Fixed
+- Concurrent test checks now publish each result in its own file. On Windows, two checks appending to the same
+  test log could overwrite part of a result and cause a spurious JSON decoding failure.
 - **A failed full check is confirmed before anyone is named.** Until now one failed run was taken as proof. On a PC
   too busy for a test suite's time limits the full check failed on the newest version, the search then failed on an
   older version for the same reason, passed on the one before it once the PC was quiet, and `praxis status` named
